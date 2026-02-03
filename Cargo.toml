@@ -1,0 +1,12 @@
+[package]
+name = "chatterd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+matrix-sdk = "0.16.0"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal", "time"] }
+toml = "0.9.11"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
