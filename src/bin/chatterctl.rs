@@ -288,10 +288,12 @@ async fn handle_room(
                 println!("(no messages)");
             }
             for item in chunk {
-                if let Some(line) = format_message_line(item) {
-                    println!("{line}");
-                } else {
-                    println!("<non-text event>");
+                match format_message_line(item) {
+                    Some(line) => println!("{line}"),
+                    None => {
+                        let kind = event_type_hint(item).unwrap_or("unknown");
+                        println!("<non-text event: {kind}>");
+                    }
                 }
             }
         }
@@ -818,15 +820,31 @@ fn print_help(args: &[String]) {
 }
 
 fn format_message_line(item: &serde_json::Value) -> Option<String> {
-    let event_id = item.get("event_id").and_then(|v| v.as_str())?;
-    let sender = item.get("sender").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let content = item.get("content")?;
-    let msgtype = content.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
-    let body = content.get("body").and_then(|v| v.as_str());
+    let event = item.get("event").and_then(|v| v.as_object()).map(|_| item.get("event")).flatten().unwrap_or(item);
+    let event_id = event.get("event_id").and_then(|v| v.as_str())?;
+    let sender = event.get("sender").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let content = event.get("content");
+    let msgtype = content
+        .and_then(|v| v.get("msgtype"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let body = content
+        .and_then(|v| v.get("body"))
+        .and_then(|v| v.as_str());
+    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if msgtype == "m.text" || msgtype == "m.notice" || msgtype == "m.emote" {
         let body = body.unwrap_or("");
-        Some(format!("{sender} {event_id} {body}"))
-    } else {
-        None
+        return Some(format!("{sender} {event_id} {body}"));
     }
+    if event_type == "m.room.message" {
+        if let Some(body) = body {
+            return Some(format!("{sender} {event_id} {body}"));
+        }
+    }
+    None
+}
+
+fn event_type_hint(item: &serde_json::Value) -> Option<&str> {
+    let event = item.get("event").and_then(|v| v.as_object()).map(|_| item.get("event")).flatten().unwrap_or(item);
+    event.get("type").and_then(|v| v.as_str())
 }
