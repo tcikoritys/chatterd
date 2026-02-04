@@ -825,7 +825,6 @@ fn print_help(args: &[String]) {
 
 fn format_message_line(item: &serde_json::Value) -> Option<String> {
     let event = extract_event_object(item)?;
-    let event_id = event.get("event_id").and_then(|v| v.as_str())?;
     let sender = event.get("sender").and_then(|v| v.as_str()).unwrap_or("unknown");
     let content = event.get("content");
     let msgtype = content
@@ -838,11 +837,11 @@ fn format_message_line(item: &serde_json::Value) -> Option<String> {
     let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if msgtype == "m.text" || msgtype == "m.notice" || msgtype == "m.emote" {
         let body = body.unwrap_or("");
-        return Some(format!("{sender} {event_id} {body}"));
+        return Some(format!("{sender}: {body}"));
     }
     if event_type == "m.room.message" {
         if let Some(body) = body {
-            return Some(format!("{sender} {event_id} {body}"));
+            return Some(format!("{sender}: {body}"));
         }
     }
     None
