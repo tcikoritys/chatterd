@@ -765,7 +765,7 @@ async fn handle_request(
             }
             Ok(Some(result))
         }
-        "matrix.rooms_sync" => {
+        "room.list" => {
             #[derive(Deserialize)]
             struct Params {
                 account_id: String,
@@ -781,9 +781,9 @@ async fn handle_request(
             let rooms = matrix::list_rooms(&client)
                 .await
                 .map_err(internal_error)?;
-            Ok(Some(serde_json::to_value(rooms).map_err(internal_error)?))
+            Ok(Some(serde_json::json!({ "rooms": rooms })))
         }
-        "matrix.room_messages" => {
+        "room.messages" => {
             #[derive(Deserialize)]
             struct Params {
                 account_id: String,
@@ -804,6 +804,35 @@ async fn handle_request(
                 .await
                 .map_err(internal_error)?;
             Ok(Some(serde_json::to_value(messages).map_err(internal_error)?))
+        }
+        "room.send" => {
+            #[derive(Deserialize)]
+            struct Params {
+                account_id: String,
+                room_id: String,
+                body: String,
+                txn_id: Option<String>,
+            }
+            let params = parse_params::<Params>(request.params.as_ref())?;
+            let client = {
+                let runtime = runtime.lock().await;
+                runtime.get_client(&params.account_id).ok_or_else(|| RpcError {
+                    code: -32602,
+                    message: "no active session".to_string(),
+                })?
+            };
+            let event_id = matrix::send_message_text(
+                &client,
+                &params.room_id,
+                &params.body,
+                params.txn_id.clone(),
+            )
+            .await
+            .map_err(internal_error)?;
+            Ok(Some(serde_json::json!({
+                "event_id": event_id,
+                "txn_id": params.txn_id,
+            })))
         }
         "matrix.verification.request" => {
             #[derive(Deserialize)]
@@ -1478,7 +1507,7 @@ async fn send_snapshot_events(
         out_tx,
         subscription_id,
         account_id,
-        "matrix.rooms.snapshot",
+        "room.list.snapshot",
         seq,
         &cursor,
         serde_json::json!({ "rooms": rooms }),

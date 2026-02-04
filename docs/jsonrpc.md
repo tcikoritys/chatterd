@@ -161,22 +161,22 @@ Response:
 {"jsonrpc":"2.0","result":{"account_id":"acct-1","status":"ready"},"id":10}
 ```
 
-### matrix.rooms_sync
-Fetch initial room list; subsequent updates arrive via events.
+### room.list
+Fetch room list for an account; subsequent updates arrive via events.
 
 Params:
 - `account_id`: string
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":11,"method":"matrix.rooms_sync","params":{"account_id":"acct-1"}}
+{"jsonrpc":"2.0","id":11,"method":"room.list","params":{"account_id":"acct-1"}}
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":{"account_id":"acct-1","rooms":[{"room_id":"!room:example.com","name":"Chatter","is_encrypted":true,"is_direct":false}],"sync_token":"r0"},"id":11}
+{"jsonrpc":"2.0","result":{"rooms":[{"room_id":"!room:example.com","name":"Chatter","is_encrypted":true,"is_direct":false}]},"id":11}
 ```
 
-### matrix.room_messages
+### room.messages
 Fetch a page of messages; new messages arrive via events.
 
 Params:
@@ -187,11 +187,29 @@ Params:
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":12,"method":"matrix.room_messages","params":{"account_id":"acct-1","room_id":"!room:example.com","limit":10}}
+{"jsonrpc":"2.0","id":12,"method":"room.messages","params":{"account_id":"acct-1","room_id":"!room:example.com","limit":10}}
 ```
 Response:
 ```json
 {"jsonrpc":"2.0","result":{"start":"t0","end":"t1","chunk":[{"event":"..."}]},"id":12}
+```
+
+### room.send
+Send a simple text message to a room.
+
+Params:
+- `account_id`: string
+- `room_id`: string
+- `body`: string
+- `txn_id`: string (optional)
+
+Request:
+```json
+{"jsonrpc":"2.0","id":13,"method":"room.send","params":{"account_id":"acct-1","room_id":"!room:example.com","body":"hello"}}
+```
+Response:
+```json
+{"jsonrpc":"2.0","result":{"event_id":"$event:example.com","txn_id":null},"id":13}
 ```
 
 ### matrix.verification.request
@@ -344,19 +362,13 @@ Daemon-side sync status for the account.
 {"state":"syncing|idle|error|offline","error":"...optional..."}
 ```
 
-#### matrix.rooms.snapshot
+#### room.list.snapshot
 Emitted when `snapshot:true`. Full room list as of subscription time.
 ```json
 {"rooms":[{"room_id":"...","name":"...","is_encrypted":true,"is_direct":false}]}
 ```
 
-#### matrix.rooms.updated
-Room list deltas.
-```json
-{"rooms":[{"room_id":"...","name":"...","is_encrypted":true,"is_direct":false}]}
-```
-
-#### matrix.room.message
+#### room.message
 ```json
 {"room_id":"!room:example.com","event":{"event":"..."}}
 ```
@@ -403,8 +415,8 @@ Either `emoji` or `decimals` may be present depending on the negotiated SAS meth
 - `matrix.login.sso_complete` -> `account.login_complete`
 - `matrix.session.restore` -> `account.session_restore`
 - `matrix.session.status` -> `events.subscribe` + `account.state` event
-- `matrix.rooms.list` -> `matrix.rooms_sync` or `events.subscribe` snapshot + `matrix.rooms.snapshot`
-- `matrix.room.messages` -> `matrix.room_messages` + `matrix.room.message` events
+- `matrix.rooms.list` -> `room.list` or `events.subscribe` snapshot + `room.list.snapshot`
+- `matrix.room.messages` -> `room.messages` + `room.message` events
 - `matrix.verification.request` -> `matrix.verification.request`
 - `matrix.verification.accept` -> `matrix.verification.accept`
 - `matrix.verification.start_sas` -> removed; use `matrix.verification.sas` event

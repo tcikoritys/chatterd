@@ -1,6 +1,6 @@
 # AGENTS
 
-Project: `chatterd` (Matrix-only daemon for Chatter).
+Project: `chatterd` (Matrix-only daemon for Chatter, with protocol-agnostic RPC where possible).
 
 ## Goals
 - Keep `chatterd` as a daemon with a JSON-RPC control surface.
@@ -36,5 +36,6 @@ Project: `chatterd` (Matrix-only daemon for Chatter).
 
 ## Notes for agents
 - Prefer spec-correct Matrix handling via `ruma` types.
-- Avoid adding UI concerns; keep daemon headless.
+- Avoid adding UI concerns; keep daemon headless. `chatterctl` is a test harness, not a UI.
+- Only use `matrix.*` methods/events when the behavior is truly Matrix-specific. Use protocol-agnostic names (e.g., `room.*`, `room.message`) otherwise.
 - Keep ASCII-only edits unless the file already uses Unicode.

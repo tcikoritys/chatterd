@@ -63,7 +63,16 @@ async fn handle_command(
     }
 
     let cmd = resolve_prefix(&parts.remove(0), &[
-        "ping", "version", "account", "events", "matrix", "verification", "help", "quit", "exit",
+        "ping",
+        "version",
+        "account",
+        "events",
+        "matrix",
+        "room",
+        "verification",
+        "help",
+        "quit",
+        "exit",
     ])?;
 
     match cmd.as_str() {
@@ -77,6 +86,7 @@ async fn handle_command(
         "account" => handle_account(addr, parts, lines).await,
         "events" => handle_events(addr, parts, lines, events_task).await,
         "matrix" => handle_matrix(addr, parts, lines).await,
+        "room" => handle_room(addr, parts, lines).await,
         "verification" => handle_verification(addr, parts, lines).await,
         _ => Ok(()),
     }
@@ -221,6 +231,67 @@ async fn handle_matrix(
             let homeserver = require_arg(parts, lines, "homeserver").await?;
             let params = json!({ "homeserver": homeserver });
             print_call(addr, "matrix.capabilities", Some(params)).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_room(
+    addr: &str,
+    parts: &mut Vec<String>,
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+) -> Result<()> {
+    if parts.is_empty() {
+        print_help(&[String::from("room")]);
+        return Ok(());
+    }
+    let sub = resolve_prefix(&parts.remove(0), &["list", "messages", "send"])?;
+    match sub.as_str() {
+        "list" => {
+            let account_id = require_arg(parts, lines, "account_id").await?;
+            let params = json!({ "account_id": account_id });
+            print_call(addr, "room.list", Some(params)).await?;
+        }
+        "messages" => {
+            let account_id = require_arg(parts, lines, "account_id").await?;
+            let room_id = require_arg(parts, lines, "room_id").await?;
+            let limit = take_flag_value(parts, "--limit")
+                .or_else(|| take_kv(parts, "limit"))
+                .and_then(|value| value.parse::<usize>().ok());
+            let from = take_flag_value(parts, "--from").or_else(|| take_kv(parts, "from"));
+            let mut params = serde_json::json!({
+                "account_id": account_id,
+                "room_id": room_id,
+            });
+            if let serde_json::Value::Object(ref mut map) = params {
+                if let Some(limit) = limit {
+                    map.insert("limit".to_string(), serde_json::Value::Number(limit.into()));
+                }
+                if let Some(from) = from {
+                    map.insert("from".to_string(), serde_json::Value::String(from));
+                }
+            }
+            print_call(addr, "room.messages", Some(params)).await?;
+        }
+        "send" => {
+            let account_id = require_arg(parts, lines, "account_id").await?;
+            let room_id = require_arg(parts, lines, "room_id").await?;
+            let body = if !parts.is_empty() {
+                let text = parts.join(" ");
+                parts.clear();
+                text
+            } else {
+                require_arg(parts, lines, "body").await?
+            };
+            let txn_id = take_flag_value(parts, "--txn-id").or_else(|| take_kv(parts, "txn_id"));
+            let params = json!({
+                "account_id": account_id,
+                "room_id": room_id,
+                "body": body,
+                "txn_id": txn_id,
+            });
+            print_call(addr, "room.send", Some(params)).await?;
         }
         _ => {}
     }
@@ -638,6 +709,7 @@ fn print_help(args: &[String]) {
         println!("  account <subcommand>");
         println!("  events <subcommand>");
         println!("  matrix <subcommand>");
+        println!("  room <subcommand>");
         println!("  verification <subcommand>");
         println!("  help [command]");
         println!("  quit");
@@ -669,6 +741,12 @@ fn print_help(args: &[String]) {
             println!("  verification accept <account_id> <user_id> <flow_id>");
             println!("  verification confirm <account_id> <user_id> <flow_id> [--match true|false]");
             println!("  verification cancel <account_id> <user_id> <flow_id>");
+        }
+        "room" => {
+            println!("room subcommands:");
+            println!("  room list <account_id>");
+            println!("  room messages <account_id> <room_id> [--limit N] [--from TOKEN]");
+            println!("  room send <account_id> <room_id> <body...> [--txn-id ID]");
         }
         _ => println!("unknown help topic"),
     }

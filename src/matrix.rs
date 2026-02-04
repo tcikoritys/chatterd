@@ -9,9 +9,14 @@ use matrix_sdk::{Client, Room};
 use matrix_sdk::{
     encryption::verification::{SasVerification, VerificationRequest},
     ruma::{
-        events::{AnySyncTimelineEvent, AnyToDeviceEvent},
+        events::{
+            room::message::RoomMessageEventContent,
+            AnySyncTimelineEvent,
+            AnyToDeviceEvent,
+        },
         serde::Raw,
         OwnedDeviceId,
+        OwnedTransactionId,
         RoomId,
         UserId,
     },
@@ -67,7 +72,7 @@ impl MatrixRuntime {
                         "room_id": room.room_id().to_string(),
                         "event": event_value,
                     });
-                    bus.emit(&account, "matrix.room.message", data).await;
+                    bus.emit(&account, "room.message", data).await;
                 }
             }
         });
@@ -533,6 +538,25 @@ pub async fn fetch_messages(
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?,
     })
+}
+
+pub async fn send_message_text(
+    client: &Client,
+    room_id: &str,
+    body: &str,
+    txn_id: Option<String>,
+) -> Result<String> {
+    let room_id = RoomId::parse(room_id)?;
+    let room = client
+        .get_room(&room_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown room"))?;
+    let content = RoomMessageEventContent::text_plain(body);
+    let mut send = room.send(content);
+    if let Some(txn_id) = txn_id {
+        send = send.with_transaction_id(OwnedTransactionId::from(txn_id));
+    }
+    let response = send.await?;
+    Ok(response.event_id.to_string())
 }
 
 pub async fn get_verification_request(
