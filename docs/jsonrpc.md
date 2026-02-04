@@ -1,18 +1,26 @@
 # JSON-RPC (chatterd)
 
-Transport: TCP, one JSON-RPC 2.0 request per line (newline-delimited JSON).
+Transport: TCP, one JSON-RPC 2.0 object per line (newline-delimited JSON).
 
 Default listen address: `127.0.0.1:9388` (set in `chatterd.toml` or `CHATTERD_CONFIG`).
 
-## UI flow
+This spec favors coarse-grained commands and a single server->client event stream per account. The event stream replaces polling-style verification and session status checks and survives UI reconnects.
 
-- Discover homeserver login options with `matrix.login_flows` and `matrix.capabilities`.
-- Create an account via `account.add`.
-- If login is SSO: UI opens `sso_url`, completes the browser flow, then calls `matrix.login.sso_complete` with the token it obtains.
-- If login is password: UI collects credentials and calls `matrix.login.password`.
-- On app restart, call `matrix.session.restore` for accounts that have `has_session: true`.
-- Use `matrix.rooms.list` and `matrix.room.messages` to render the room list and timeline.
-- Use `matrix.verification.*` to handle SAS emoji/decimal verification for E2EE.
+## Architecture alignment (summary)
+
+- `chatterd` is a long-lived daemon that owns Matrix session state and crypto. UIs are dumb clients.
+- The daemon keeps syncing even when no UI is connected.
+- Verification state is persisted by the daemon and re-emitted on reconnect.
+
+## UI flow (high level)
+
+- Create an account with `account.add`.
+- Subscribe to events with `events.subscribe` (one subscription per account per TCP connection).
+- Start login with `account.login_start`.
+- Complete login with `account.login_complete` (SSO) or `account.login_password` (password).
+- Restore sessions with `account.session_restore`.
+- Initial data arrives via snapshot events if `snapshot:true`; use events for updates.
+- Use verification commands; SAS details arrive via events.
 
 ## Methods
 
@@ -33,7 +41,7 @@ Request:
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":"0.1.0","id":2}
+{"jsonrpc":"2.0","result":"0.2.0","id":2}
 ```
 
 ### account.list
@@ -43,7 +51,7 @@ Request:
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":[],"id":3}
+{"jsonrpc":"2.0","result":[{"account_id":"acct-1","homeserver":"https://example.com","login_method":"sso","status":"needs_login","has_session":false}],"id":3}
 ```
 
 ### account.add
@@ -57,47 +65,68 @@ Request:
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":{"id":"acct-1","homeserver":"https://example.com","login_method":"sso","status":"needs_login"},"id":4}
+{"jsonrpc":"2.0","result":{"account_id":"acct-1","homeserver":"https://example.com","login_method":"sso","status":"needs_login"},"id":4}
 ```
 
-### login.start
+### events.subscribe
+Start a single server->client event stream for an account on the current TCP connection. The daemon continues syncing even if the client disconnects. On reconnect, use `since` to catch up; if the cursor is too old, the server will emit `events.reset` and resend snapshots.
+
+Params:
+- `account_id`: string
+- `since`: string (optional cursor for resuming)
+- `snapshot`: bool (optional; default true). If true, server emits snapshot events for current account state, room list, and active verifications.
+
+Request:
+```json
+{"jsonrpc":"2.0","id":5,"method":"events.subscribe","params":{"account_id":"acct-1","snapshot":true}}
+```
+Response:
+```json
+{"jsonrpc":"2.0","result":{"subscription_id":"sub-1","account_id":"acct-1","since":"cursor-123"},"id":5}
+```
+
+### events.unsubscribe
+Params:
+- `subscription_id`: string
+
+Request:
+```json
+{"jsonrpc":"2.0","id":6,"method":"events.unsubscribe","params":{"subscription_id":"sub-1"}}
+```
+Response:
+```json
+{"jsonrpc":"2.0","result":{"ok":true},"id":6}
+```
+
+### account.login_start
 Params:
 - `account_id`: string
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":5,"method":"login.start","params":{"account_id":"acct-1"}}
+{"jsonrpc":"2.0","id":7,"method":"account.login_start","params":{"account_id":"acct-1"}}
 ```
 Response (SSO):
 ```json
-{"jsonrpc":"2.0","result":{"account_id":"acct-1","login_method":"sso","sso_url":"https://example.com/_matrix/client/v3/login/sso/redirect","redirect_url":"http://127.0.0.1:9388/callback"},"id":5}
+{"jsonrpc":"2.0","result":{"account_id":"acct-1","login_method":"sso","sso_url":"https://example.com/_matrix/client/v3/login/sso/redirect","redirect_url":"http://127.0.0.1:9388/callback"},"id":7}
 ```
 
-### login.complete
+### account.login_complete
 Params:
 - `account_id`: string
 - `token`: string (opaque; UI-provided)
+- `device_name`: string (optional)
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":6,"method":"login.complete","params":{"account_id":"acct-1","token":"opaque-token"}}
+{"jsonrpc":"2.0","id":8,"method":"account.login_complete","params":{"account_id":"acct-1","token":"opaque-token","device_name":"Chatter Desktop"}}
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":{"account_id":"acct-1","status":"ready"},"id":6}
+{"jsonrpc":"2.0","result":{"account_id":"acct-1","status":"ready"},"id":8}
 ```
 
-### matrix.session.status
-Request:
-```json
-{"jsonrpc":"2.0","id":7,"method":"matrix.session.status"}
-```
-Response:
-```json
-{"jsonrpc":"2.0","result":[{"account_id":"acct-1","homeserver":"https://example.com","status":"ready","has_session":true}],"id":7}
-```
-
-### matrix.login.password
+### account.login_password
 Params:
 - `account_id`: string
 - `username`: string (Matrix user ID)
@@ -106,70 +135,60 @@ Params:
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":8,"method":"matrix.login.password","params":{"account_id":"acct-1","username":"@alice:example.com","password":"secret","device_name":"Chatter Desktop"}}
-```
-Response:
-```json
-{"jsonrpc":"2.0","result":{"account_id":"acct-1","status":"ready"},"id":8}
-```
-
-### matrix.login.sso_complete
-Params:
-- `account_id`: string
-- `token`: string (login token from the UI flow)
-- `device_name`: string (optional)
-
-Request:
-```json
-{"jsonrpc":"2.0","id":9,"method":"matrix.login.sso_complete","params":{"account_id":"acct-1","token":"sso-token","device_name":"Chatter Desktop"}}
+{"jsonrpc":"2.0","id":9,"method":"account.login_password","params":{"account_id":"acct-1","username":"@alice:example.com","password":"secret","device_name":"Chatter Desktop"}}
 ```
 Response:
 ```json
 {"jsonrpc":"2.0","result":{"account_id":"acct-1","status":"ready"},"id":9}
 ```
 
-### matrix.session.restore
+### account.session_restore
 Params:
 - `account_id`: string
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":10,"method":"matrix.session.restore","params":{"account_id":"acct-1"}}
+{"jsonrpc":"2.0","id":10,"method":"account.session_restore","params":{"account_id":"acct-1"}}
 ```
 Response:
 ```json
 {"jsonrpc":"2.0","result":{"account_id":"acct-1","status":"ready"},"id":10}
 ```
 
-### matrix.rooms.list
+### matrix.rooms_sync
+Fetch initial room list; subsequent updates arrive via events.
+
 Params:
 - `account_id`: string
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":11,"method":"matrix.rooms.list","params":{"account_id":"acct-1"}}
+{"jsonrpc":"2.0","id":11,"method":"matrix.rooms_sync","params":{"account_id":"acct-1"}}
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":[{"room_id":"!room:example.com","name":"Chatter","is_encrypted":true,"is_direct":false}],"id":11}
+{"jsonrpc":"2.0","result":{"account_id":"acct-1","rooms":[{"room_id":"!room:example.com","name":"Chatter","is_encrypted":true,"is_direct":false}],"sync_token":"r0"},"id":11}
 ```
 
-### matrix.room.messages
+### matrix.room_messages
+Fetch a page of messages; new messages arrive via events.
+
 Params:
 - `account_id`: string
 - `room_id`: string
 - `limit`: number (optional; default 20)
+- `from`: string (optional pagination token)
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":12,"method":"matrix.room.messages","params":{"account_id":"acct-1","room_id":"!room:example.com","limit":10}}
+{"jsonrpc":"2.0","id":12,"method":"matrix.room_messages","params":{"account_id":"acct-1","room_id":"!room:example.com","limit":10}}
 ```
 Response:
 ```json
 {"jsonrpc":"2.0","result":{"start":"t0","end":"t1","chunk":[{"event":"..."}]},"id":12}
 ```
 
-### matrix.verification.request
+### matrix.verification_request
 Params:
 - `account_id`: string
 - `user_id`: string
@@ -177,14 +196,14 @@ Params:
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":13,"method":"matrix.verification.request","params":{"account_id":"acct-1","user_id":"@alice:example.com"}}
+{"jsonrpc":"2.0","id":13,"method":"matrix.verification_request","params":{"account_id":"acct-1","user_id":"@alice:example.com"}}
 ```
 Response:
 ```json
 {"jsonrpc":"2.0","result":{"flow_id":"abcd","user_id":"@alice:example.com","state":"requested"},"id":13}
 ```
 
-### matrix.verification.accept
+### matrix.verification_accept
 Params:
 - `account_id`: string
 - `user_id`: string
@@ -192,44 +211,14 @@ Params:
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":14,"method":"matrix.verification.accept","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
+{"jsonrpc":"2.0","id":14,"method":"matrix.verification_accept","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
 ```
 Response:
 ```json
 {"jsonrpc":"2.0","result":{"flow_id":"abcd","status":"accepted"},"id":14}
 ```
 
-### matrix.verification.start_sas
-Params:
-- `account_id`: string
-- `user_id`: string
-- `flow_id`: string
-
-Request:
-```json
-{"jsonrpc":"2.0","id":15,"method":"matrix.verification.start_sas","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
-```
-Response:
-```json
-{"jsonrpc":"2.0","result":{"supports_emoji":true,"can_be_presented":true,"is_done":false,"is_cancelled":false,"emoji":[{"symbol":"🦊","description":"fox"}]},"id":15}
-```
-
-### matrix.verification.sas
-Params:
-- `account_id`: string
-- `user_id`: string
-- `flow_id`: string
-
-Request:
-```json
-{"jsonrpc":"2.0","id":16,"method":"matrix.verification.sas","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
-```
-Response:
-```json
-{"jsonrpc":"2.0","result":{"supports_emoji":true,"can_be_presented":true,"is_done":false,"is_cancelled":false,"decimals":[123,456,789]},"id":16}
-```
-
-### matrix.verification.confirm
+### matrix.verification_confirm
 Params:
 - `account_id`: string
 - `user_id`: string
@@ -238,14 +227,14 @@ Params:
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":17,"method":"matrix.verification.confirm","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd","match":true}}
+{"jsonrpc":"2.0","id":15,"method":"matrix.verification_confirm","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd","match":true}}
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":{"flow_id":"abcd","status":"confirmed"},"id":17}
+{"jsonrpc":"2.0","result":{"flow_id":"abcd","status":"confirmed"},"id":15}
 ```
 
-### matrix.verification.cancel
+### matrix.verification_cancel
 Params:
 - `account_id`: string
 - `user_id`: string
@@ -253,11 +242,11 @@ Params:
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":18,"method":"matrix.verification.cancel","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
+{"jsonrpc":"2.0","id":16,"method":"matrix.verification_cancel","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":{"flow_id":"abcd","status":"cancelled"},"id":18}
+{"jsonrpc":"2.0","result":{"flow_id":"abcd","status":"cancelled"},"id":16}
 ```
 
 ### matrix.login_flows
@@ -266,11 +255,11 @@ Params:
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":19,"method":"matrix.login_flows","params":{"homeserver":"https://example.com"}}
+{"jsonrpc":"2.0","id":17,"method":"matrix.login_flows","params":{"homeserver":"https://example.com"}}
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":{"homeserver":"https://example.com","login":{"flows":[{"type":"m.login.password"}]}},"id":19}
+{"jsonrpc":"2.0","result":{"homeserver":"https://example.com","login":{"flows":[{"type":"m.login.password"}]}},"id":17}
 ```
 If the homeserver returns a non-spec response, `parse_warning` is included and `login` will contain raw JSON.
 
@@ -280,10 +269,136 @@ Params:
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":20,"method":"matrix.capabilities","params":{"homeserver":"https://example.com"}}
+{"jsonrpc":"2.0","id":18,"method":"matrix.capabilities","params":{"homeserver":"https://example.com"}}
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":{"homeserver":"https://example.com","capabilities":{"m.change_password":{"enabled":true}}},"id":20}
+{"jsonrpc":"2.0","result":{"homeserver":"https://example.com","capabilities":{"m.change_password":{"enabled":true}}},"id":18}
 ```
 If the homeserver returns a non-spec response, `parse_warning` is included and `capabilities` will contain raw JSON.
+
+## Event stream
+
+Event stream is delivered as JSON-RPC notifications on the same TCP connection used by `events.subscribe`:
+
+```json
+{"jsonrpc":"2.0","method":"events.push","params":{"subscription_id":"sub-1","account_id":"acct-1","seq":42,"cursor":"cursor-124","type":"matrix.verification.sas","data":{...}}}
+```
+
+If the `since` cursor is too old or invalid, the server emits `events.reset` and replays snapshots if `snapshot:true`.
+
+### Event types
+
+#### events.reset
+```json
+{"reason":"cursor_too_old|invalid_cursor","new_since":"cursor-200"}
+```
+
+#### account.state
+Emitted on subscribe (snapshot) and when status changes.
+```json
+{"account_id":"acct-1","status":"needs_login|ready|error","has_session":false,"error":"...optional..."}
+```
+
+#### matrix.sync.state
+Daemon-side sync status for the account.
+```json
+{"state":"syncing|idle|error|offline","error":"...optional..."}
+```
+
+#### matrix.rooms.snapshot
+Emitted when `snapshot:true`. Full room list as of subscription time.
+```json
+{"rooms":[{"room_id":"...","name":"...","is_encrypted":true,"is_direct":false}]}
+```
+
+#### matrix.rooms.updated
+Room list deltas.
+```json
+{"rooms":[{"room_id":"...","name":"...","is_encrypted":true,"is_direct":false}]}
+```
+
+#### matrix.room.message
+```json
+{"room_id":"!room:example.com","event":{"event":"..."}}
+```
+
+#### matrix.login.ready
+```json
+{"status":"ready","device_id":"DEVICE","user_id":"@alice:example.com"}
+```
+
+#### matrix.login.failed
+```json
+{"error":"..."}
+```
+
+#### matrix.verification.state
+Emitted for each active verification on subscribe (snapshot) and on state changes.
+```json
+{"flow_id":"abcd","user_id":"@alice:example.com","device_id":"DEVICE","stage":"requested|accepted|sas|done|cancelled"}
+```
+
+#### matrix.verification.sas
+Emitted when SAS is available (including after reconnect if still active).
+```json
+{"flow_id":"abcd","user_id":"@alice:example.com","supports_emoji":true,"can_be_presented":true,"emoji":[{"symbol":"🦊","description":"fox"}],"decimals":[123,456,789]}
+```
+
+#### matrix.verification.done
+```json
+{"flow_id":"abcd","user_id":"@alice:example.com","result":"verified"}
+```
+
+#### matrix.verification.cancelled
+```json
+{"flow_id":"abcd","user_id":"@alice:example.com","reason":"user_cancelled|mismatch|timeout"}
+```
+
+## chatterctl minimal command list (login + SAS verification)
+
+1. `chatterctl account add --homeserver https://example.com [--login-method sso|password]`
+2. `chatterctl events subscribe --account acct-1 [--since CURSOR] [--snapshot]`
+3. `chatterctl login start --account acct-1`
+4. `chatterctl login complete --account acct-1 --token TOKEN [--device-name "Chatter Desktop"]`
+5. `chatterctl login password --account acct-1 --username @alice:example.com --password SECRET [--device-name "Chatter Desktop"]`
+6. `chatterctl verification request --account acct-1 --user @alice:example.com [--device DEVICE]`
+7. `chatterctl verification accept --account acct-1 --user @alice:example.com --flow abcd`
+8. `chatterctl verification confirm --account acct-1 --user @alice:example.com --flow abcd --match true`
+9. `chatterctl verification cancel --account acct-1 --user @alice:example.com --flow abcd`
+
+## Migration map (old -> new)
+
+- `account.add` -> `account.add`
+- `login.start` -> `account.login_start`
+- `login.complete` -> `account.login_complete`
+- `matrix.login.password` -> `account.login_password`
+- `matrix.login.sso_complete` -> `account.login_complete`
+- `matrix.session.restore` -> `account.session_restore`
+- `matrix.session.status` -> `events.subscribe` + `account.state` event
+- `matrix.rooms.list` -> `matrix.rooms_sync` or `events.subscribe` snapshot + `matrix.rooms.snapshot`
+- `matrix.room.messages` -> `matrix.room_messages` + `matrix.room.message` events
+- `matrix.verification.request` -> `matrix.verification_request`
+- `matrix.verification.accept` -> `matrix.verification_accept`
+- `matrix.verification.start_sas` -> removed; use `matrix.verification.sas` event
+- `matrix.verification.sas` -> removed; use `matrix.verification.sas` event
+- `matrix.verification.confirm` -> `matrix.verification_confirm`
+- `matrix.verification.cancel` -> `matrix.verification_cancel`
+- `matrix.login_flows` -> unchanged (optional)
+- `matrix.capabilities` -> unchanged (optional)
+
+Unchanged: `rpc.ping`, `rpc.version`, `account.list`.
+
+## State and persistence
+
+Persisted by daemon (must survive UI restarts):
+- Account registry, homeserver URL, login method.
+- Matrix session and device data.
+- E2EE crypto state and key material.
+- Active verification flows (including SAS state if in progress).
+- Event cursor for each account (optional but recommended for resume).
+
+Ephemeral (can be reconstructed or re-fetched):
+- TCP subscriptions and `subscription_id` values.
+- Snapshot emission state for a given connection.
+- In-flight command results.
