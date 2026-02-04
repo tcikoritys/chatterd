@@ -276,7 +276,24 @@ async fn handle_room(
                     map.insert("from".to_string(), serde_json::Value::String(from));
                 }
             }
-            print_call(addr, "room.messages", Some(params)).await?;
+            let value = call_json(addr, "room.messages", Some(params)).await?;
+            let result = value
+                .get("result")
+                .ok_or_else(|| anyhow!("room.messages: missing result"))?;
+            let chunk = result
+                .get("chunk")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow!("room.messages: missing chunk"))?;
+            if chunk.is_empty() {
+                println!("(no messages)");
+            }
+            for item in chunk {
+                if let Some(line) = format_message_line(item) {
+                    println!("{line}");
+                } else {
+                    println!("<non-text event>");
+                }
+            }
         }
         "send" => {
             let account_id = require_arg(parts, lines, "account_id").await?;
@@ -797,5 +814,19 @@ fn print_help(args: &[String]) {
             println!("  room send <account_id> <room_id> <body...> [--txn-id ID]");
         }
         _ => println!("unknown help topic"),
+    }
+}
+
+fn format_message_line(item: &serde_json::Value) -> Option<String> {
+    let event_id = item.get("event_id").and_then(|v| v.as_str())?;
+    let sender = item.get("sender").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let content = item.get("content")?;
+    let msgtype = content.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
+    let body = content.get("body").and_then(|v| v.as_str());
+    if msgtype == "m.text" || msgtype == "m.notice" || msgtype == "m.emote" {
+        let body = body.unwrap_or("");
+        Some(format!("{sender} {event_id} {body}"))
+    } else {
+        None
     }
 }
