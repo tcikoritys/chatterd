@@ -255,7 +255,11 @@ async fn handle_room(
         }
         "messages" => {
             let account_id = require_arg(parts, lines, "account_id").await?;
-            let room_id = require_arg(parts, lines, "room_id").await?;
+            let room_id = if !parts.is_empty() {
+                parts.remove(0)
+            } else {
+                select_room(addr, lines, &account_id).await?
+            };
             let limit = take_flag_value(parts, "--limit")
                 .or_else(|| take_kv(parts, "limit"))
                 .and_then(|value| value.parse::<usize>().ok());
@@ -276,7 +280,11 @@ async fn handle_room(
         }
         "send" => {
             let account_id = require_arg(parts, lines, "account_id").await?;
-            let room_id = require_arg(parts, lines, "room_id").await?;
+            let room_id = if !parts.is_empty() {
+                parts.remove(0)
+            } else {
+                select_room(addr, lines, &account_id).await?
+            };
             let body = if !parts.is_empty() {
                 let text = parts.join(" ");
                 parts.clear();
@@ -568,6 +576,46 @@ async fn select_device(
         .and_then(|v| v.as_str())
         .map(|v| v.to_string());
     Ok(device_id)
+}
+
+async fn select_room(
+    addr: &str,
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+    account_id: &str,
+) -> Result<String> {
+    let params = json!({ "account_id": account_id });
+    let value = call_json(addr, "room.list", Some(params)).await?;
+    let list = value
+        .get("result")
+        .and_then(|v| v.get("rooms"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if list.is_empty() {
+        return Err(anyhow!("no rooms found"));
+    }
+    let labels: Vec<String> = list
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let room_id = item
+                .get("room_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unnamed");
+            format!("{idx}: {name} ({room_id})")
+        })
+        .collect();
+    let index = prompt_select(lines, "Select room", &labels).await?;
+    let room_id = list
+        .get(index)
+        .and_then(|item| item.get("room_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing room_id"))?;
+    Ok(room_id.to_string())
 }
 
 async fn select_flow(
