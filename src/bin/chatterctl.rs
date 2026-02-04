@@ -824,7 +824,7 @@ fn print_help(args: &[String]) {
 }
 
 fn format_message_line(item: &serde_json::Value) -> Option<String> {
-    let event = item.get("event").and_then(|v| v.as_object()).map(|_| item.get("event")).flatten().unwrap_or(item);
+    let event = extract_event_object(item)?;
     let event_id = event.get("event_id").and_then(|v| v.as_str())?;
     let sender = event.get("sender").and_then(|v| v.as_str()).unwrap_or("unknown");
     let content = event.get("content");
@@ -849,6 +849,16 @@ fn format_message_line(item: &serde_json::Value) -> Option<String> {
 }
 
 fn event_type_hint(item: &serde_json::Value) -> Option<&str> {
-    let event = item.get("event").and_then(|v| v.as_object()).map(|_| item.get("event")).flatten().unwrap_or(item);
-    event.get("type").and_then(|v| v.as_str())
+    extract_event_object(item)
+        .and_then(|event| event.get("type"))
+        .and_then(|v| v.as_str())
+}
+
+fn extract_event_object(item: &serde_json::Value) -> Option<&serde_json::Value> {
+    if let Some(event) = item.get("event") {
+        return Some(event);
+    }
+    item.get("kind")
+        .and_then(|v| v.get("Decrypted"))
+        .and_then(|v| v.get("event"))
 }
