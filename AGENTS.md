@@ -9,6 +9,9 @@ Project: `chatterd` (Matrix-only daemon for Chatter).
 
 ## Repo layout
 - `src/main.rs`: daemon + JSON-RPC skeleton.
+- `src/config.rs`: daemon config loading/defaults.
+- `src/state.rs`: account/state types + persistence.
+- `src/rpc.rs`: JSON-RPC server and Matrix discovery handlers.
 - `docs/jsonrpc.md`: JSON-RPC method reference.
 - `chatterd.toml` (optional): daemon prefs only.
 
