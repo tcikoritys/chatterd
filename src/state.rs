@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LoginMethod {
     Password,
@@ -21,7 +21,7 @@ pub enum AccountStatus {
 pub struct Account {
     pub id: String,
     pub homeserver: String,
-    pub login_method: LoginMethod,
+    pub login_method: Option<LoginMethod>,
     pub status: AccountStatus,
     #[serde(default)]
     pub session: Option<MatrixSession>,

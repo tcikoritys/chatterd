@@ -3,6 +3,7 @@ use crate::matrix::{self, MatrixRuntime, VerificationSnapshot};
 use crate::state::{Account, AccountStatus, LoginMethod, State};
 use anyhow::Result;
 use matrix_sdk::stream::StreamExt;
+use matrix_sdk::encryption::verification::SasState;
 use matrix_sdk::ruma::{OwnedDeviceId, UserId};
 use ruma_common::api::IncomingResponse;
 use serde::Deserialize;
@@ -45,6 +46,7 @@ struct AccountAddParams {
 #[derive(Debug, Deserialize)]
 struct LoginStartParams {
     account_id: String,
+    login_method: Option<LoginMethod>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +64,18 @@ struct EventsUnsubscribeParams {
 #[derive(Debug, Deserialize)]
 struct MatrixHomeserverParams {
     homeserver: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MatrixDevicesListParams {
+    account_id: String,
+    user_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MatrixVerificationListParams {
+    account_id: String,
+    user_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -424,14 +438,40 @@ async fn handle_request(
         }
         "account.add" => {
             let params = parse_params::<AccountAddParams>(request.params.as_ref())?;
+            let homeserver = resolve_homeserver(&params.homeserver).await?;
+            let login = fetch_ruma_json::<
+                ruma_client_api::session::get_login_types::v3::Response,
+            >(
+                &homeserver,
+                "/_matrix/client/v3/login",
+            )
+            .await?;
+            let available = extract_login_methods(&login.value);
+
+            if let Some(method) = params.login_method.clone() {
+                if !available.contains(&method) {
+                    return Err(RpcError {
+                        code: -32602,
+                        message: "unsupported login method".to_string(),
+                    });
+                }
+            }
+
+            let selected = if let Some(method) = params.login_method.clone() {
+                Some(method)
+            } else if available.len() == 1 {
+                Some(available[0].clone())
+            } else {
+                None
+            };
+
             let mut state = state.lock().await;
             let id = format!("acct-{}", state.next_id);
             state.next_id += 1;
-            let login_method = params.login_method.unwrap_or(LoginMethod::Sso);
             let account = Account {
                 id: id.clone(),
-                homeserver: params.homeserver,
-                login_method,
+                homeserver: homeserver.clone(),
+                login_method: selected,
                 status: AccountStatus::NeedsLogin,
                 session: None,
             };
@@ -449,7 +489,18 @@ async fn handle_request(
                     }),
                 )
                 .await;
-            Ok(Some(serde_json::to_value(account).map_err(internal_error)?))
+            let mut response = serde_json::to_value(account).map_err(internal_error)?;
+            if let serde_json::Value::Object(ref mut obj) = response {
+                obj.insert(
+                    "available_login_methods".to_string(),
+                    serde_json::to_value(&available).map_err(internal_error)?,
+                );
+                obj.insert("login_flows".to_string(), login.value);
+                if let Some(warn) = login.parse_warning {
+                    obj.insert("parse_warning".to_string(), serde_json::Value::String(warn));
+                }
+            }
+            Ok(Some(response))
         }
         "account.login_password" => {
             #[derive(Deserialize)]
@@ -500,6 +551,7 @@ async fn handle_request(
                         code: -32602,
                         message: "unknown account".to_string(),
                     })?;
+                account.login_method = Some(LoginMethod::Password);
                 account.session = Some(session);
                 account.status = AccountStatus::Ready;
                 state.save().map_err(internal_error)?;
@@ -589,6 +641,7 @@ async fn handle_request(
                         code: -32602,
                         message: "unknown account".to_string(),
                     })?;
+                account.login_method = Some(LoginMethod::Sso);
                 account.session = Some(session);
                 account.status = AccountStatus::Ready;
                 state.save().map_err(internal_error)?;
@@ -767,9 +820,27 @@ async fn handle_request(
                     message: "no active session".to_string(),
                 })?
             };
+            let user_id = if params.user_id == "me" || params.user_id == "self" {
+                client.user_id().ok_or_else(|| RpcError {
+                    code: -32602,
+                    message: "no session user id".to_string(),
+                })?.to_string()
+            } else {
+                params.user_id.clone()
+            };
+            if params.device_id.is_none() {
+                if let Some(own_user_id) = client.user_id() {
+                    if own_user_id.as_str() == user_id {
+                        return Err(RpcError {
+                            code: -32602,
+                            message: "device_id required for self verification".to_string(),
+                        });
+                    }
+                }
+            }
 
             let verification = if let Some(device_id) = params.device_id.as_deref() {
-                let user_id = UserId::parse(&params.user_id).map_err(internal_error)?;
+                let user_id = UserId::parse(&user_id).map_err(internal_error)?;
                 let device_id = OwnedDeviceId::try_from(device_id)
                     .map_err(internal_error)?;
                 let device = client
@@ -783,7 +854,7 @@ async fn handle_request(
                     })?;
                 device.request_verification().await.map_err(internal_error)?
             } else {
-                let user_id = UserId::parse(&params.user_id).map_err(internal_error)?;
+                let user_id = UserId::parse(&user_id).map_err(internal_error)?;
                 let identity = client
                     .encryption()
                     .get_user_identity(&user_id)
@@ -852,9 +923,10 @@ async fn handle_request(
                     message: "no active session".to_string(),
                 })?
             };
+            let user_id = resolve_user_id_param(&client, &params.user_id)?;
             let request = matrix::get_verification_request(
                 &client,
-                &params.user_id,
+                &user_id,
                 &params.flow_id,
             )
             .await
@@ -890,7 +962,7 @@ async fn handle_request(
                     "matrix.verification.state",
                     serde_json::json!({
                         "flow_id": params.flow_id,
-                        "user_id": params.user_id,
+                        "user_id": user_id,
                         "stage": "accepted",
                     }),
                 )
@@ -903,7 +975,7 @@ async fn handle_request(
                     runtime.verifications_handle()
                 };
                 let account_id = params.account_id.clone();
-                let user_id = params.user_id.clone();
+                let user_id = user_id.clone();
                 let flow_id = params.flow_id.clone();
                 let request = request.clone();
                 tokio::spawn(async move {
@@ -914,134 +986,89 @@ async fn handle_request(
                             VerificationRequestState::Ready { .. } => {
                                 if let Ok(Some(sas)) = request.start_sas().await {
                                     let _ = sas.accept().await;
-                                    let sas_json = sas_to_json(&sas);
-                                    {
-                                        let mut guard = verifications.lock().await;
-                                        guard
-                                            .entry(account_id.clone())
-                                            .or_insert_with(std::collections::HashMap::new)
-                                            .insert(
-                                                flow_id.clone(),
-                                                VerificationSnapshot {
-                                                    flow_id: flow_id.clone(),
-                                                    user_id: user_id.clone(),
-                                                    device_id: None,
-                                                    stage: "sas".to_string(),
-                                                    sas: Some(sas_json.clone()),
-                                                },
-                                            );
-                                    }
-                                    event_bus
-                                        .emit(
-                                            &account_id,
-                                            "matrix.verification.state",
-                                            serde_json::json!({
-                                                "flow_id": flow_id,
-                                                "user_id": user_id,
-                                                "stage": "sas",
-                                            }),
+                                    let event_bus = event_bus.clone();
+                                    let verifications = verifications.clone();
+                                    let account_id = account_id.clone();
+                                    let flow_id = flow_id.clone();
+                                    let user_id = user_id.clone();
+                                    tokio::spawn(async move {
+                                        emit_sas_when_ready(
+                                            event_bus,
+                                            verifications,
+                                            account_id,
+                                            flow_id,
+                                            user_id,
+                                            sas,
                                         )
                                         .await;
-                                    event_bus
-                                        .emit(
-                                            &account_id,
-                                            "matrix.verification.sas",
-                                            serde_json::json!({
-                                                "flow_id": flow_id,
-                                                "user_id": user_id,
-                                                "supports_emoji": sas.supports_emoji(),
-                                                "can_be_presented": sas.can_be_presented(),
-                                                "emoji": sas_json.get("emoji").cloned().unwrap_or(serde_json::Value::Null),
-                                                "decimals": sas_json.get("decimals").cloned().unwrap_or(serde_json::Value::Null),
-                                            }),
-                                        )
-                                        .await;
+                                    });
                                 }
                             }
                             VerificationRequestState::Transitioned { verification } => {
                                 if let Verification::SasV1(sas) = verification {
-                                    let sas_json = sas_to_json(&sas);
-                                    {
-                                        let mut guard = verifications.lock().await;
-                                        guard
-                                            .entry(account_id.clone())
-                                            .or_insert_with(std::collections::HashMap::new)
-                                            .insert(
-                                                flow_id.clone(),
-                                                VerificationSnapshot {
-                                                    flow_id: flow_id.clone(),
-                                                    user_id: user_id.clone(),
-                                                    device_id: None,
-                                                    stage: "sas".to_string(),
-                                                    sas: Some(sas_json.clone()),
-                                                },
-                                            );
-                                    }
-                                    event_bus
-                                        .emit(
-                                            &account_id,
-                                            "matrix.verification.state",
-                                            serde_json::json!({
-                                                "flow_id": flow_id,
-                                                "user_id": user_id,
-                                                "stage": "sas",
-                                            }),
+                                    let _ = sas.accept().await;
+                                    let event_bus = event_bus.clone();
+                                    let verifications = verifications.clone();
+                                    let account_id = account_id.clone();
+                                    let flow_id = flow_id.clone();
+                                    let user_id = user_id.clone();
+                                    tokio::spawn(async move {
+                                        emit_sas_when_ready(
+                                            event_bus,
+                                            verifications,
+                                            account_id,
+                                            flow_id,
+                                            user_id,
+                                            sas,
                                         )
                                         .await;
-                                    event_bus
-                                        .emit(
-                                            &account_id,
-                                            "matrix.verification.sas",
-                                            serde_json::json!({
-                                                "flow_id": flow_id,
-                                                "user_id": user_id,
-                                                "supports_emoji": sas.supports_emoji(),
-                                                "can_be_presented": sas.can_be_presented(),
-                                                "emoji": sas_json.get("emoji").cloned().unwrap_or(serde_json::Value::Null),
-                                                "decimals": sas_json.get("decimals").cloned().unwrap_or(serde_json::Value::Null),
-                                            }),
-                                        )
-                                        .await;
+                                    });
                                 }
                             }
                             VerificationRequestState::Done => {
-                                {
+                                let removed = {
                                     let mut guard = verifications.lock().await;
-                                    if let Some(entries) = guard.get_mut(&account_id) {
-                                        entries.remove(&flow_id);
-                                    }
+                                    guard
+                                        .get_mut(&account_id)
+                                        .and_then(|entries| entries.remove(&flow_id))
+                                        .is_some()
+                                };
+                                if removed {
+                                    event_bus
+                                        .emit(
+                                            &account_id,
+                                            "matrix.verification.done",
+                                            serde_json::json!({
+                                                "flow_id": flow_id,
+                                                "user_id": user_id,
+                                                "reason": "verified",
+                                            }),
+                                        )
+                                        .await;
                                 }
-                                event_bus
-                                    .emit(
-                                        &account_id,
-                                        "matrix.verification.done",
-                                        serde_json::json!({
-                                            "flow_id": flow_id,
-                                            "user_id": user_id,
-                                            "reason": "verified",
-                                        }),
-                                    )
-                                    .await;
                                 break;
                             }
                             VerificationRequestState::Cancelled(info) => {
-                                {
+                                let removed = {
                                     let mut guard = verifications.lock().await;
-                                    if let Some(entries) = guard.get_mut(&account_id) {
-                                        entries.remove(&flow_id);
-                                    }
+                                    guard
+                                        .get_mut(&account_id)
+                                        .and_then(|entries| entries.remove(&flow_id))
+                                        .is_some()
+                                };
+                                if removed {
+                                    event_bus
+                                        .emit(
+                                            &account_id,
+                                            "matrix.verification.cancelled",
+                                            serde_json::json!({
+                                                "flow_id": flow_id,
+                                                "user_id": user_id,
+                                                "reason": format!("{info:?}"),
+                                            }),
+                                        )
+                                        .await;
                                 }
-                                event_bus
-                                    .emit(
-                                        &account_id,
-                                        "matrix.verification.cancelled",
-                                        serde_json::json!({
-                                            "flow_id": flow_id,
-                                            "user_id": user_id,
-                                            "reason": format!("{info:?}"),
-                                        }),
-                                    )
-                                    .await;
                                 break;
                             }
                             _ => {}
@@ -1061,6 +1088,7 @@ async fn handle_request(
                 account_id: String,
                 user_id: String,
                 flow_id: String,
+                #[serde(rename = "match")]
                 match_: bool,
             }
             let params = parse_params::<Params>(request.params.as_ref())?;
@@ -1071,7 +1099,8 @@ async fn handle_request(
                     message: "no active session".to_string(),
                 })?
             };
-            let sas = matrix::get_sas_verification(&client, &params.user_id, &params.flow_id)
+            let user_id = resolve_user_id_param(&client, &params.user_id)?;
+            let sas = matrix::get_sas_verification(&client, &user_id, &params.flow_id)
                 .await
                 .map_err(internal_error)?
                 .ok_or_else(|| RpcError {
@@ -1090,7 +1119,7 @@ async fn handle_request(
                         "matrix.verification.done",
                         serde_json::json!({
                             "flow_id": params.flow_id,
-                            "user_id": params.user_id,
+                            "user_id": user_id,
                             "reason": "verified",
                         }),
                     )
@@ -1102,7 +1131,7 @@ async fn handle_request(
                         "matrix.verification.cancelled",
                         serde_json::json!({
                             "flow_id": params.flow_id,
-                            "user_id": params.user_id,
+                            "user_id": user_id,
                             "reason": "mismatch",
                         }),
                     )
@@ -1138,9 +1167,10 @@ async fn handle_request(
                     message: "no active session".to_string(),
                 })?
             };
+            let user_id = resolve_user_id_param(&client, &params.user_id)?;
             if let Some(request) = matrix::get_verification_request(
                 &client,
-                &params.user_id,
+                &user_id,
                 &params.flow_id,
             )
             .await
@@ -1149,16 +1179,16 @@ async fn handle_request(
                 request.cancel().await.map_err(internal_error)?;
             }
             event_bus
-                .emit(
-                    &params.account_id,
-                    "matrix.verification.cancelled",
-                    serde_json::json!({
-                        "flow_id": params.flow_id,
-                        "user_id": params.user_id,
-                        "reason": "user_cancelled",
-                    }),
-                )
-                .await;
+                    .emit(
+                        &params.account_id,
+                        "matrix.verification.cancelled",
+                        serde_json::json!({
+                            "flow_id": params.flow_id,
+                            "user_id": user_id,
+                            "reason": "user_cancelled",
+                        }),
+                    )
+                    .await;
             let verifications = {
                 let runtime = runtime.lock().await;
                 runtime.verifications_handle()
@@ -1176,9 +1206,9 @@ async fn handle_request(
         }
         "account.login_start" => {
             let params = parse_params::<LoginStartParams>(request.params.as_ref())?;
-            let mut state = state.lock().await;
-            let (account_id, login_method, homeserver) = {
-                let account = state
+            let mut state_guard = state.lock().await;
+            let (account_id, stored_method, homeserver) = {
+                let account = state_guard
                     .accounts
                     .iter_mut()
                     .find(|acct| acct.id == params.account_id)
@@ -1194,8 +1224,14 @@ async fn handle_request(
                     account.homeserver.clone(),
                 )
             };
-            state.save().map_err(internal_error)?;
-            if let Some(account) = state.accounts.iter().find(|acct| acct.id == account_id) {
+            state_guard.save().map_err(internal_error)?;
+            let account_snapshot = state_guard
+                .accounts
+                .iter()
+                .find(|acct| acct.id == account_id)
+                .cloned();
+            drop(state_guard);
+            if let Some(account) = account_snapshot {
                 event_bus
                     .emit(
                         &account.id,
@@ -1209,24 +1245,51 @@ async fn handle_request(
                     .await;
             }
 
-            let account_snapshot = state
-                .accounts
-                .iter()
-                .find(|acct| acct.id == account_id)
-                .cloned();
-            drop(state);
-            if let Some(account) = account_snapshot {
-                event_bus
-                    .emit(
-                        &account.id,
-                        "account.state",
-                        serde_json::json!({
-                            "account_id": account.id,
-                            "status": status_to_string(&account.status),
-                            "has_session": account.session.is_some(),
-                        }),
-                    )
-                    .await;
+            let homeserver = resolve_homeserver(&homeserver).await?;
+            let login = fetch_ruma_json::<
+                ruma_client_api::session::get_login_types::v3::Response,
+            >(
+                &homeserver,
+                "/_matrix/client/v3/login",
+            )
+            .await?;
+            let available = extract_login_methods(&login.value);
+
+            let login_method = if let Some(method) = params.login_method.clone() {
+                if !available.contains(&method) {
+                    return Err(RpcError {
+                        code: -32602,
+                        message: "unsupported login method".to_string(),
+                    });
+                }
+                method
+            } else if let Some(method) = stored_method.clone() {
+                if !available.contains(&method) {
+                    return Err(RpcError {
+                        code: -32602,
+                        message: "unsupported login method".to_string(),
+                    });
+                }
+                method
+            } else if available.len() == 1 {
+                available[0].clone()
+            } else {
+                return Err(RpcError {
+                    code: -32602,
+                    message: "login method required".to_string(),
+                });
+            };
+
+            if stored_method.as_ref() != Some(&login_method) {
+                let mut state_guard = state.lock().await;
+                if let Some(account) = state_guard
+                    .accounts
+                    .iter_mut()
+                    .find(|acct| acct.id == account_id)
+                {
+                    account.login_method = Some(login_method.clone());
+                    state_guard.save().map_err(internal_error)?;
+                }
             }
 
             let mut response = serde_json::Map::new();
@@ -1278,6 +1341,84 @@ async fn handle_request(
                 "capabilities",
                 capabilities,
             )))
+        }
+        "matrix.devices.list" => {
+            let params = parse_params::<MatrixDevicesListParams>(request.params.as_ref())?;
+            let client = {
+                let runtime = runtime.lock().await;
+                runtime.get_client(&params.account_id).ok_or_else(|| RpcError {
+                    code: -32602,
+                    message: "no active session".to_string(),
+                })?
+            };
+            let user_id = if let Some(user_id) = params.user_id {
+                UserId::parse(&user_id).map_err(internal_error)?
+            } else {
+                client
+                    .user_id()
+                    .map(|user_id| user_id.to_owned())
+                    .ok_or_else(|| RpcError {
+                    code: -32602,
+                    message: "missing user id".to_string(),
+                })?
+            };
+            let devices = client
+                .encryption()
+                .get_user_devices(&user_id)
+                .await
+                .map_err(internal_error)?;
+            let items: Vec<_> = devices
+                .devices()
+                .map(|device| {
+                    serde_json::json!({
+                        "user_id": device.user_id().to_string(),
+                        "device_id": device.device_id().to_string(),
+                        "display_name": device.display_name(),
+                        "is_verified": device.is_verified(),
+                    })
+                })
+                .collect();
+            Ok(Some(serde_json::Value::Array(items)))
+        }
+        "matrix.verification.list" => {
+            let params = parse_params::<MatrixVerificationListParams>(request.params.as_ref())?;
+            let verifications_handle = {
+                let runtime = runtime.lock().await;
+                runtime.verifications_handle()
+            };
+            let items = {
+                let guard = verifications_handle.lock().await;
+                guard
+                    .get(&params.account_id)
+                    .map(|entries| {
+                        entries
+                            .values()
+                            .filter(|entry| {
+                                params
+                                    .user_id
+                                    .as_ref()
+                                    .map(|user_id| &entry.user_id == user_id)
+                                    .unwrap_or(true)
+                            })
+                            .map(|entry| {
+                                let short_id = if entry.flow_id.len() > 8 {
+                                    entry.flow_id[..8].to_string()
+                                } else {
+                                    entry.flow_id.clone()
+                                };
+                                serde_json::json!({
+                                    "flow_id": entry.flow_id,
+                                    "short_id": short_id,
+                                    "user_id": entry.user_id,
+                                    "device_id": entry.device_id,
+                                    "stage": entry.stage,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            Ok(Some(serde_json::Value::Array(items)))
         }
         _ => Err(RpcError {
             code: -32601,
@@ -1476,6 +1617,42 @@ async fn resolve_homeserver(homeserver: &str) -> Result<String, RpcError> {
     Ok(client.homeserver().to_string())
 }
 
+fn extract_login_methods(value: &serde_json::Value) -> Vec<LoginMethod> {
+    let flows = value
+        .get("flows")
+        .and_then(|flows| flows.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut methods = Vec::new();
+    for flow in flows {
+        let flow_type = flow.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if flow_type == "m.login.password" {
+            if !methods.contains(&LoginMethod::Password) {
+                methods.push(LoginMethod::Password);
+            }
+        } else if flow_type.starts_with("m.login.sso") || flow_type == "m.login.sso" {
+            if !methods.contains(&LoginMethod::Sso) {
+                methods.push(LoginMethod::Sso);
+            }
+        }
+    }
+    methods
+}
+
+fn resolve_user_id_param(client: &matrix_sdk::Client, value: &str) -> Result<String, RpcError> {
+    if value == "me" || value == "self" {
+        client
+            .user_id()
+            .map(|user_id| user_id.to_string())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "no session user id".to_string(),
+            })
+    } else {
+        Ok(value.to_string())
+    }
+}
+
 async fn fetch_ruma_json<T>(homeserver: &str, path: &str) -> Result<FetchResult, RpcError>
 where
     T: IncomingResponse,
@@ -1567,4 +1744,103 @@ fn sas_to_json(sas: &matrix_sdk::encryption::verification::SasVerification) -> s
         response.insert("emoji".to_string(), serde_json::Value::Array(items));
     }
     serde_json::Value::Object(response)
+}
+
+async fn emit_sas_when_ready(
+    event_bus: std::sync::Arc<EventBus>,
+    verifications: std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, VerificationSnapshot>>>,
+    >,
+    account_id: String,
+    flow_id: String,
+    user_id: String,
+    sas: matrix_sdk::encryption::verification::SasVerification,
+) {
+    if sas.can_be_presented() {
+        let sas_json = sas_to_json(&sas);
+        if set_sas_snapshot(&verifications, &account_id, &flow_id, &user_id, &sas_json).await {
+            emit_sas_events(&event_bus, &account_id, &flow_id, &user_id, &sas_json).await;
+        }
+        return;
+    }
+
+    let mut changes = sas.changes();
+    while let Some(state) = changes.next().await {
+        match state {
+            SasState::KeysExchanged { .. } => {
+                let sas_json = sas_to_json(&sas);
+                if set_sas_snapshot(&verifications, &account_id, &flow_id, &user_id, &sas_json).await
+                {
+                    emit_sas_events(&event_bus, &account_id, &flow_id, &user_id, &sas_json).await;
+                }
+                break;
+            }
+            SasState::Cancelled(_) | SasState::Done { .. } => break,
+            _ => {}
+        }
+    }
+}
+
+async fn set_sas_snapshot(
+    verifications: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, VerificationSnapshot>>>,
+    >,
+    account_id: &str,
+    flow_id: &str,
+    user_id: &str,
+    sas_json: &serde_json::Value,
+) -> bool {
+    let mut guard = verifications.lock().await;
+    let entry = guard
+        .entry(account_id.to_string())
+        .or_insert_with(std::collections::HashMap::new)
+        .entry(flow_id.to_string())
+        .or_insert_with(|| VerificationSnapshot {
+            flow_id: flow_id.to_string(),
+            user_id: user_id.to_string(),
+            device_id: None,
+            stage: "sas".to_string(),
+            sas: None,
+        });
+    if entry.sas.is_some() {
+        false
+    } else {
+        entry.stage = "sas".to_string();
+        entry.sas = Some(sas_json.clone());
+        true
+    }
+}
+
+async fn emit_sas_events(
+    event_bus: &std::sync::Arc<EventBus>,
+    account_id: &str,
+    flow_id: &str,
+    user_id: &str,
+    sas_json: &serde_json::Value,
+) {
+    event_bus
+        .emit(
+            account_id,
+            "matrix.verification.state",
+            serde_json::json!({
+                "flow_id": flow_id,
+                "user_id": user_id,
+                "stage": "sas",
+            }),
+        )
+        .await;
+    event_bus
+        .emit(
+            account_id,
+            "matrix.verification.sas",
+            serde_json::json!({
+                "flow_id": flow_id,
+                "user_id": user_id,
+                "supports_emoji": sas_json.get("supports_emoji").cloned().unwrap_or(serde_json::Value::Null),
+                "can_be_presented": sas_json.get("can_be_presented").cloned().unwrap_or(serde_json::Value::Null),
+                "emoji": sas_json.get("emoji").cloned().unwrap_or(serde_json::Value::Null),
+                "decimals": sas_json.get("decimals").cloned().unwrap_or(serde_json::Value::Null),
+            }),
+        )
+        .await;
 }

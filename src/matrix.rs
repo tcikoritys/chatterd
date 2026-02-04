@@ -20,6 +20,8 @@ use matrix_sdk::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use matrix_sdk::encryption::verification::SasState;
+use matrix_sdk::stream::StreamExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -72,11 +74,13 @@ impl MatrixRuntime {
         let to_device_bus = bus.clone();
         let to_device_account = account.clone();
         let to_device_verifications = self.verifications.clone();
+        let to_device_client = client.clone();
         client.add_event_handler(
             move |raw: Raw<AnyToDeviceEvent>, _info: Option<EncryptionInfo>| {
                 let bus = to_device_bus.clone();
                 let account = to_device_account.clone();
                 let verifications = to_device_verifications.clone();
+                let client = to_device_client.clone();
                 async move {
                     let Ok(Some(event_type)) = raw.get_field::<String>("type") else {
                         return;
@@ -142,26 +146,74 @@ impl MatrixRuntime {
                         return;
                     }
 
+                    if matches!(
+                        event_type.as_str(),
+                        "m.key.verification.ready"
+                            | "m.key.verification.start"
+                            | "m.key.verification.accept"
+                            | "m.key.verification.key"
+                            | "m.key.verification.mac"
+                    ) {
+                        let Some(flow_id) = transaction_id else {
+                            return;
+                        };
+                        let user_id = match UserId::parse(&sender) {
+                            Ok(user_id) => user_id,
+                            Err(_) => return,
+                        };
+                        let sas = match client
+                            .encryption()
+                            .get_verification(&user_id, &flow_id)
+                            .await
+                        {
+                            Some(verification) => verification.sas(),
+                            None => None,
+                        };
+                        if let Some(sas) = sas {
+                            let _ = sas.accept().await;
+                            let bus = bus.clone();
+                            let verifications = verifications.clone();
+                            let account = account.clone();
+                            let flow_id = flow_id.clone();
+                            let sender = sender.clone();
+                            tokio::spawn(async move {
+                                emit_sas_when_ready(
+                                    bus,
+                                    verifications,
+                                    account,
+                                    flow_id,
+                                    sender,
+                                    sas,
+                                )
+                                .await;
+                            });
+                        }
+                        return;
+                    }
+
                     if event_type == "m.key.verification.done" {
                         let Some(flow_id) = transaction_id else {
                             return;
                         };
-                        {
+                        let removed = {
                             let mut guard = verifications.lock().await;
-                            if let Some(entries) = guard.get_mut(&account) {
-                                entries.remove(&flow_id);
-                            }
+                            guard
+                                .get_mut(&account)
+                                .and_then(|entries| entries.remove(&flow_id))
+                                .is_some()
+                        };
+                        if removed {
+                            bus.emit(
+                                &account,
+                                "matrix.verification.done",
+                                serde_json::json!({
+                                    "flow_id": flow_id,
+                                    "user_id": sender,
+                                    "reason": "verified",
+                                }),
+                            )
+                            .await;
                         }
-                        bus.emit(
-                            &account,
-                            "matrix.verification.done",
-                            serde_json::json!({
-                                "flow_id": flow_id,
-                                "user_id": sender,
-                                "reason": "verified",
-                            }),
-                        )
-                        .await;
                         return;
                     }
 
@@ -175,22 +227,25 @@ impl MatrixRuntime {
                             .and_then(|value| value.as_str())
                             .unwrap_or("cancelled")
                             .to_string();
-                        {
+                        let removed = {
                             let mut guard = verifications.lock().await;
-                            if let Some(entries) = guard.get_mut(&account) {
-                                entries.remove(&flow_id);
-                            }
+                            guard
+                                .get_mut(&account)
+                                .and_then(|entries| entries.remove(&flow_id))
+                                .is_some()
+                        };
+                        if removed {
+                            bus.emit(
+                                &account,
+                                "matrix.verification.cancelled",
+                                serde_json::json!({
+                                    "flow_id": flow_id,
+                                    "user_id": sender,
+                                    "reason": reason,
+                                }),
+                            )
+                            .await;
                         }
-                        bus.emit(
-                            &account,
-                            "matrix.verification.cancelled",
-                            serde_json::json!({
-                                "flow_id": flow_id,
-                                "user_id": sender,
-                                "reason": reason,
-                            }),
-                        )
-                        .await;
                     }
                 }
             },
@@ -234,6 +289,131 @@ impl MatrixRuntime {
     ) -> Arc<Mutex<HashMap<String, HashMap<String, VerificationSnapshot>>>> {
         self.verifications.clone()
     }
+}
+
+fn sas_to_json(sas: &SasVerification) -> serde_json::Value {
+    let mut response = serde_json::Map::new();
+    response.insert(
+        "supports_emoji".to_string(),
+        serde_json::Value::Bool(sas.supports_emoji()),
+    );
+    response.insert(
+        "can_be_presented".to_string(),
+        serde_json::Value::Bool(sas.can_be_presented()),
+    );
+    response.insert("is_done".to_string(), serde_json::Value::Bool(sas.is_done()));
+    response.insert(
+        "is_cancelled".to_string(),
+        serde_json::Value::Bool(sas.is_cancelled()),
+    );
+    if let Some(decimals) = sas.decimals() {
+        response.insert(
+            "decimals".to_string(),
+            serde_json::json!([decimals.0, decimals.1, decimals.2]),
+        );
+    }
+    if let Some(emojis) = sas.emoji() {
+        let items: Vec<_> = emojis
+            .iter()
+            .map(|e| serde_json::json!({"symbol": e.symbol, "description": e.description}))
+            .collect();
+        response.insert("emoji".to_string(), serde_json::Value::Array(items));
+    }
+    serde_json::Value::Object(response)
+}
+
+async fn emit_sas_when_ready(
+    bus: Arc<EventBus>,
+    verifications: Arc<Mutex<HashMap<String, HashMap<String, VerificationSnapshot>>>>,
+    account: String,
+    flow_id: String,
+    sender: String,
+    sas: SasVerification,
+) {
+    if sas.can_be_presented() {
+        let sas_json = sas_to_json(&sas);
+        if set_sas_snapshot(&verifications, &account, &flow_id, &sender, &sas_json).await {
+            emit_sas_events(&bus, &account, &flow_id, &sender, &sas_json).await;
+        }
+        return;
+    }
+
+    let mut changes = sas.changes();
+    while let Some(state) = changes.next().await {
+        match state {
+            SasState::KeysExchanged { .. } => {
+                let sas_json = sas_to_json(&sas);
+                if set_sas_snapshot(&verifications, &account, &flow_id, &sender, &sas_json).await {
+                    emit_sas_events(&bus, &account, &flow_id, &sender, &sas_json).await;
+                }
+                break;
+            }
+            SasState::Cancelled(_) | SasState::Done { .. } => {
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn set_sas_snapshot(
+    verifications: &Arc<Mutex<HashMap<String, HashMap<String, VerificationSnapshot>>>>,
+    account: &str,
+    flow_id: &str,
+    sender: &str,
+    sas_json: &serde_json::Value,
+) -> bool {
+    let mut guard = verifications.lock().await;
+    let entry = guard
+        .entry(account.to_string())
+        .or_insert_with(HashMap::new)
+        .entry(flow_id.to_string())
+        .or_insert_with(|| VerificationSnapshot {
+            flow_id: flow_id.to_string(),
+            user_id: sender.to_string(),
+            device_id: None,
+            stage: "sas".to_string(),
+            sas: None,
+        });
+    if entry.sas.is_some() {
+        false
+    } else {
+        entry.stage = "sas".to_string();
+        entry.sas = Some(sas_json.clone());
+        true
+    }
+}
+
+async fn emit_sas_events(
+    bus: &Arc<EventBus>,
+    account: &str,
+    flow_id: &str,
+    sender: &str,
+    sas_json: &serde_json::Value,
+) {
+    bus.emit(
+        account,
+        "matrix.verification.state",
+        serde_json::json!({
+            "flow_id": flow_id,
+            "user_id": sender,
+            "stage": "sas",
+        }),
+    )
+    .await;
+    bus.emit(
+        account,
+        "matrix.verification.sas",
+        serde_json::json!({
+            "flow_id": flow_id,
+            "user_id": sender,
+            "supports_emoji": sas_json.get("supports_emoji").cloned().unwrap_or(serde_json::Value::Null),
+            "can_be_presented": sas_json.get("can_be_presented").cloned().unwrap_or(serde_json::Value::Null),
+            "emoji": sas_json.get("emoji").cloned().unwrap_or(serde_json::Value::Null),
+            "decimals": sas_json.get("decimals").cloned().unwrap_or(serde_json::Value::Null),
+        }),
+    )
+    .await;
 }
 
 pub fn account_store_dir(state_dir: &Path, account_id: &str) -> PathBuf {

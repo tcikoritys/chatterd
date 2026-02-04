@@ -56,16 +56,16 @@ Response:
 
 ### account.add
 Params:
-- `homeserver`: string
-- `login_method`: `sso` or `password` (optional; defaults to `sso`)
+- `homeserver`: string (server name or URL; discovery performed)
+- `login_method`: `sso` or `password` (optional; validated against discovery)
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":4,"method":"account.add","params":{"homeserver":"https://example.com","login_method":"sso"}}
+{"jsonrpc":"2.0","id":4,"method":"account.add","params":{"homeserver":"failbox.xyz"}}
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":{"account_id":"acct-1","homeserver":"https://example.com","login_method":"sso","status":"needs_login"},"id":4}
+{"jsonrpc":"2.0","result":{"account_id":"acct-1","homeserver":"https://matrix.failbox.xyz","login_method":null,"status":"needs_login","available_login_methods":["password","sso"],"login_flows":{"flows":[{"type":"m.login.password"},{"type":"m.login.sso"}]}},"id":4}
 ```
 
 ### events.subscribe
@@ -101,10 +101,11 @@ Response:
 ### account.login_start
 Params:
 - `account_id`: string
+- `login_method`: `sso` or `password` (optional; required if multiple methods and none selected)
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":7,"method":"account.login_start","params":{"account_id":"acct-1"}}
+{"jsonrpc":"2.0","id":7,"method":"account.login_start","params":{"account_id":"acct-1","login_method":"sso"}}
 ```
 Response (SSO):
 ```json
