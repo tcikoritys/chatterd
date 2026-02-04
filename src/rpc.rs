@@ -1256,7 +1256,7 @@ async fn handle_request(
         }
         "matrix.login_flows" => {
             let params = parse_params::<MatrixHomeserverParams>(request.params.as_ref())?;
-            let homeserver = normalize_homeserver(&params.homeserver);
+            let homeserver = resolve_homeserver(&params.homeserver).await?;
             let login = fetch_ruma_json::<
                 ruma_client_api::session::get_login_types::v3::Response,
             >(
@@ -1268,7 +1268,7 @@ async fn handle_request(
         }
         "matrix.capabilities" => {
             let params = parse_params::<MatrixHomeserverParams>(request.params.as_ref())?;
-            let homeserver = normalize_homeserver(&params.homeserver);
+            let homeserver = resolve_homeserver(&params.homeserver).await?;
             let capabilities = fetch_ruma_json::<
                 ruma_client_api::discovery::get_capabilities::v3::Response,
             >(&homeserver, "/_matrix/client/v3/capabilities")
@@ -1467,12 +1467,13 @@ fn matrix_response(homeserver: String, key: &str, result: FetchResult) -> serde_
     serde_json::Value::Object(response)
 }
 
-fn normalize_homeserver(homeserver: &str) -> String {
-    if homeserver.starts_with("http://") || homeserver.starts_with("https://") {
-        homeserver.to_string()
-    } else {
-        format!("https://{homeserver}")
-    }
+async fn resolve_homeserver(homeserver: &str) -> Result<String, RpcError> {
+    let client = matrix_sdk::Client::builder()
+        .server_name_or_homeserver_url(homeserver)
+        .build()
+        .await
+        .map_err(internal_error)?;
+    Ok(client.homeserver().to_string())
 }
 
 async fn fetch_ruma_json<T>(homeserver: &str, path: &str) -> Result<FetchResult, RpcError>

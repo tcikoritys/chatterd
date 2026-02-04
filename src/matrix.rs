@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use url::Url;
 
 pub struct MatrixRuntime {
     clients: HashMap<String, Client>,
@@ -243,9 +242,8 @@ pub fn account_store_dir(state_dir: &Path, account_id: &str) -> PathBuf {
 
 pub async fn build_client(homeserver: &str, store_dir: &Path) -> Result<Client> {
     tokio::fs::create_dir_all(store_dir).await?;
-    let homeserver = Url::parse(homeserver)?;
     let client = Client::builder()
-        .homeserver_url(homeserver)
+        .server_name_or_homeserver_url(homeserver)
         .sqlite_store(store_dir.join("store.db"), None)
         .build()
         .await?;
