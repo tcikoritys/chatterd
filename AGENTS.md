@@ -8,10 +8,11 @@ Project: `chatterd` (Matrix-only daemon for Chatter).
 - Do not store user credentials in config; use state storage.
 
 ## Repo layout
-- `src/main.rs`: daemon + JSON-RPC skeleton.
+- `src/main.rs`: daemon entrypoint + JSON-RPC wiring.
 - `src/config.rs`: daemon config loading/defaults.
 - `src/state.rs`: account/state types + persistence.
-- `src/rpc.rs`: JSON-RPC server and Matrix discovery handlers.
+- `src/matrix.rs`: Matrix SDK helpers + runtime.
+- `src/rpc.rs`: JSON-RPC server and Matrix handlers.
 - `docs/jsonrpc.md`: JSON-RPC method reference.
 - `chatterd.toml` (optional): daemon prefs only.
 

@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.100"
-matrix-sdk = "0.16.0"
+matrix-sdk = { version = "0.16.0", features = ["e2e-encryption", "sqlite"] }
 http = "1.1.0"
 reqwest = { version = "0.12.28", features = ["json"] }
 ruma-common = "0.17.1"
@@ -16,3 +16,4 @@ tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal",
 toml = "0.9.11"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+url = "2.5.8"

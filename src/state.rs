@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +23,16 @@ pub struct Account {
     pub homeserver: String,
     pub login_method: LoginMethod,
     pub status: AccountStatus,
+    #[serde(default)]
+    pub session: Option<MatrixSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatrixSession {
+    pub user_id: String,
+    pub device_id: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -67,5 +77,9 @@ impl State {
         let contents = serde_json::to_string_pretty(&persisted)?;
         fs::write(&path, contents)?;
         Ok(())
+    }
+
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 }

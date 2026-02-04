@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -8,10 +10,12 @@ use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 mod config;
+mod matrix;
 mod rpc;
 mod state;
 
 use crate::config::Config;
+use crate::matrix::MatrixRuntime;
 use crate::state::State;
 
 #[tokio::main]
@@ -34,6 +38,7 @@ async fn main() {
     }
 
     let state = std::sync::Arc::new(tokio::sync::Mutex::new(State::load(state_dir)));
+    let runtime = std::sync::Arc::new(tokio::sync::Mutex::new(MatrixRuntime::new()));
 
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let rpc_addr = config
@@ -42,8 +47,11 @@ async fn main() {
         .unwrap_or_else(|| "127.0.0.1:9388".to_string());
     let rpc_shutdown = shutdown_tx.subscribe();
     let rpc_state = state.clone();
+    let rpc_runtime = runtime.clone();
     tokio::spawn(async move {
-        if let Err(err) = rpc::run_rpc_server(&rpc_addr, rpc_state, rpc_shutdown).await {
+        if let Err(err) =
+            rpc::run_rpc_server(&rpc_addr, rpc_state, rpc_runtime, rpc_shutdown).await
+        {
             warn!("rpc server failed: {}", err);
         }
     });
