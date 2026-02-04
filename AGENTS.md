@@ -13,6 +13,7 @@ Project: `chatterd` (Matrix-only daemon for Chatter).
 - `src/state.rs`: account/state types + persistence.
 - `src/matrix.rs`: Matrix SDK helpers + runtime.
 - `src/rpc.rs`: JSON-RPC server and Matrix handlers.
+- `src/events.rs`: server event bus + cursored history.
 - `docs/jsonrpc.md`: JSON-RPC method reference.
 - `chatterd.toml` (optional): daemon prefs only.
 
@@ -24,6 +25,7 @@ Project: `chatterd` (Matrix-only daemon for Chatter).
 ## JSON-RPC
 - Transport: TCP, newline-delimited JSON.
 - Default listen: `127.0.0.1:9388`.
+- Event stream: `events.subscribe` per account; daemon continues syncing across UI reconnects.
 - Matrix discovery uses spec-typed responses and falls back to raw JSON with `parse_warning`.
 
 ## Build/test
