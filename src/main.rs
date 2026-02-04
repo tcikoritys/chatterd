@@ -10,11 +10,13 @@ use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 mod config;
+mod events;
 mod matrix;
 mod rpc;
 mod state;
 
 use crate::config::Config;
+use crate::events::EventBus;
 use crate::matrix::MatrixRuntime;
 use crate::state::State;
 
@@ -38,7 +40,10 @@ async fn main() {
     }
 
     let state = std::sync::Arc::new(tokio::sync::Mutex::new(State::load(state_dir)));
-    let runtime = std::sync::Arc::new(tokio::sync::Mutex::new(MatrixRuntime::new()));
+    let event_bus = EventBus::new(1024);
+    let runtime = std::sync::Arc::new(tokio::sync::Mutex::new(MatrixRuntime::new(
+        event_bus.clone(),
+    )));
 
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let rpc_addr = config
@@ -48,9 +53,10 @@ async fn main() {
     let rpc_shutdown = shutdown_tx.subscribe();
     let rpc_state = state.clone();
     let rpc_runtime = runtime.clone();
+    let rpc_events = event_bus.clone();
     tokio::spawn(async move {
         if let Err(err) =
-            rpc::run_rpc_server(&rpc_addr, rpc_state, rpc_runtime, rpc_shutdown).await
+            rpc::run_rpc_server(&rpc_addr, rpc_state, rpc_runtime, rpc_events, rpc_shutdown).await
         {
             warn!("rpc server failed: {}", err);
         }
