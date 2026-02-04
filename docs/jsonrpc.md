@@ -51,7 +51,7 @@ Request:
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":[{"account_id":"acct-1","homeserver":"https://example.com","login_method":"sso","status":"needs_login","has_session":false}],"id":3}
+{"jsonrpc":"2.0","result":[{"account_id":"acct-1","homeserver":"https://example.com","login_method":null,"status":"needs_login","has_session":false}],"id":3}
 ```
 
 ### account.add
@@ -65,8 +65,9 @@ Request:
 ```
 Response:
 ```json
-{"jsonrpc":"2.0","result":{"account_id":"acct-1","homeserver":"https://matrix.failbox.xyz","login_method":null,"status":"needs_login","available_login_methods":["password","sso"],"login_flows":{"flows":[{"type":"m.login.password"},{"type":"m.login.sso"}]}},"id":4}
+{"jsonrpc":"2.0","result":{"account_id":"acct-1","homeserver":"https://matrix.failbox.xyz","login_method":null,"status":"needs_login","available_login_methods":["password","sso"],"login_flows":{"flows":[{"type":"m.login.password"},{"type":"m.login.sso"}]},"parse_warning":null},"id":4}
 ```
+If the homeserver returns a non-spec response, `parse_warning` is included and `login_flows` will contain raw JSON.
 
 ### events.subscribe
 Start a single server->client event stream for an account on the current TCP connection. The daemon continues syncing even if the client disconnects. On reconnect, use `since` to catch up; if the cursor is too old, the server will emit `events.reset` and resend snapshots.
@@ -110,6 +111,10 @@ Request:
 Response (SSO):
 ```json
 {"jsonrpc":"2.0","result":{"account_id":"acct-1","login_method":"sso","sso_url":"https://example.com/_matrix/client/v3/login/sso/redirect","redirect_url":"http://127.0.0.1:9388/callback"},"id":7}
+```
+Response (password):
+```json
+{"jsonrpc":"2.0","result":{"account_id":"acct-1","login_method":"password"},"id":7}
 ```
 
 ### account.login_complete
@@ -189,61 +194,61 @@ Response:
 {"jsonrpc":"2.0","result":{"start":"t0","end":"t1","chunk":[{"event":"..."}]},"id":12}
 ```
 
-### matrix.verification_request
+### matrix.verification.request
 Params:
 - `account_id`: string
-- `user_id`: string
-- `device_id`: string (optional; if omitted, request identity verification)
+- `user_id`: string (`me`/`self` allowed to mean current account)
+- `device_id`: string (required for self verification; optional otherwise)
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":13,"method":"matrix.verification_request","params":{"account_id":"acct-1","user_id":"@alice:example.com"}}
+{"jsonrpc":"2.0","id":13,"method":"matrix.verification.request","params":{"account_id":"acct-1","user_id":"@alice:example.com"}}
 ```
 Response:
 ```json
 {"jsonrpc":"2.0","result":{"flow_id":"abcd","user_id":"@alice:example.com","state":"requested"},"id":13}
 ```
 
-### matrix.verification_accept
+### matrix.verification.accept
 Params:
 - `account_id`: string
-- `user_id`: string
+- `user_id`: string (`me`/`self` allowed)
 - `flow_id`: string
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":14,"method":"matrix.verification_accept","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
+{"jsonrpc":"2.0","id":14,"method":"matrix.verification.accept","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
 ```
 Response:
 ```json
 {"jsonrpc":"2.0","result":{"flow_id":"abcd","status":"accepted"},"id":14}
 ```
 
-### matrix.verification_confirm
+### matrix.verification.confirm
 Params:
 - `account_id`: string
-- `user_id`: string
+- `user_id`: string (`me`/`self` allowed)
 - `flow_id`: string
 - `match`: bool
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":15,"method":"matrix.verification_confirm","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd","match":true}}
+{"jsonrpc":"2.0","id":15,"method":"matrix.verification.confirm","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd","match":true}}
 ```
 Response:
 ```json
 {"jsonrpc":"2.0","result":{"flow_id":"abcd","status":"confirmed"},"id":15}
 ```
 
-### matrix.verification_cancel
+### matrix.verification.cancel
 Params:
 - `account_id`: string
-- `user_id`: string
+- `user_id`: string (`me`/`self` allowed)
 - `flow_id`: string
 
 Request:
 ```json
-{"jsonrpc":"2.0","id":16,"method":"matrix.verification_cancel","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
+{"jsonrpc":"2.0","id":16,"method":"matrix.verification.cancel","params":{"account_id":"acct-1","user_id":"@alice:example.com","flow_id":"abcd"}}
 ```
 Response:
 ```json
@@ -252,7 +257,7 @@ Response:
 
 ### matrix.login_flows
 Params:
-- `homeserver`: string (hostname or URL)
+- `homeserver`: string (server name or URL; discovery performed)
 
 Request:
 ```json
@@ -266,7 +271,7 @@ If the homeserver returns a non-spec response, `parse_warning` is included and `
 
 ### matrix.capabilities
 Params:
-- `homeserver`: string (hostname or URL)
+- `homeserver`: string (server name or URL; discovery performed)
 
 Request:
 ```json
@@ -277,6 +282,38 @@ Response:
 {"jsonrpc":"2.0","result":{"homeserver":"https://example.com","capabilities":{"m.change_password":{"enabled":true}}},"id":18}
 ```
 If the homeserver returns a non-spec response, `parse_warning` is included and `capabilities` will contain raw JSON.
+
+### matrix.devices.list
+List devices for a user. If `user_id` is omitted, lists devices for the current account user.
+
+Params:
+- `account_id`: string
+- `user_id`: string (optional; `me`/`self` allowed)
+
+Request:
+```json
+{"jsonrpc":"2.0","id":19,"method":"matrix.devices.list","params":{"account_id":"acct-1","user_id":"@alice:example.com"}}
+```
+Response:
+```json
+{"jsonrpc":"2.0","result":[{"user_id":"@alice:example.com","device_id":"DEVICE","display_name":"Chatter Desktop","is_verified":false}],"id":19}
+```
+
+### matrix.verification.list
+List active verification flows for an account.
+
+Params:
+- `account_id`: string
+- `user_id`: string (optional; filter by user; `me`/`self` allowed)
+
+Request:
+```json
+{"jsonrpc":"2.0","id":20,"method":"matrix.verification.list","params":{"account_id":"acct-1","user_id":"@alice:example.com"}}
+```
+Response:
+```json
+{"jsonrpc":"2.0","result":[{"flow_id":"abcd","short_id":"abcd","user_id":"@alice:example.com","device_id":"DEVICE","stage":"sas"}],"id":20}
+```
 
 ## Event stream
 
@@ -341,10 +378,11 @@ Emitted for each active verification on subscribe (snapshot) and on state change
 ```
 
 #### matrix.verification.sas
-Emitted when SAS is available (including after reconnect if still active).
+Emitted when SAS is ready for presentation (including after reconnect if still active).
 ```json
 {"flow_id":"abcd","user_id":"@alice:example.com","supports_emoji":true,"can_be_presented":true,"emoji":[{"symbol":"🦊","description":"fox"}],"decimals":[123,456,789]}
 ```
+Either `emoji` or `decimals` may be present depending on the negotiated SAS method.
 
 #### matrix.verification.done
 ```json
@@ -356,17 +394,19 @@ Emitted when SAS is available (including after reconnect if still active).
 {"flow_id":"abcd","user_id":"@alice:example.com","reason":"user_cancelled|mismatch|timeout|error|cancelled"}
 ```
 
-## chatterctl minimal command list (login + SAS verification)
+## chatterctl (interactive)
 
-1. `chatterctl account add --homeserver https://example.com [--login-method sso|password]`
-2. `chatterctl events subscribe --account acct-1 [--since CURSOR] [--snapshot]`
-3. `chatterctl login start --account acct-1`
-4. `chatterctl login complete --account acct-1 --token TOKEN [--device-name "Chatter Desktop"]`
-5. `chatterctl login password --account acct-1 --username @alice:example.com --password SECRET [--device-name "Chatter Desktop"]`
-6. `chatterctl verification request --account acct-1 --user @alice:example.com [--device DEVICE]`
-7. `chatterctl verification accept --account acct-1 --user @alice:example.com --flow abcd`
-8. `chatterctl verification confirm --account acct-1 --user @alice:example.com --flow abcd --match true`
-9. `chatterctl verification cancel --account acct-1 --user @alice:example.com --flow abcd`
+`chatterctl` is an interactive REPL. Example session:
+
+```text
+account add https://example.com
+events subscribe acct-1
+account login-start acct-1
+account login-complete acct-1 TOKEN
+verification request acct-1 me
+verification confirm acct-1 me
+help
+```
 
 ## Migration map (old -> new)
 
@@ -379,12 +419,12 @@ Emitted when SAS is available (including after reconnect if still active).
 - `matrix.session.status` -> `events.subscribe` + `account.state` event
 - `matrix.rooms.list` -> `matrix.rooms_sync` or `events.subscribe` snapshot + `matrix.rooms.snapshot`
 - `matrix.room.messages` -> `matrix.room_messages` + `matrix.room.message` events
-- `matrix.verification.request` -> `matrix.verification_request`
-- `matrix.verification.accept` -> `matrix.verification_accept`
+- `matrix.verification.request` -> `matrix.verification.request`
+- `matrix.verification.accept` -> `matrix.verification.accept`
 - `matrix.verification.start_sas` -> removed; use `matrix.verification.sas` event
 - `matrix.verification.sas` -> removed; use `matrix.verification.sas` event
-- `matrix.verification.confirm` -> `matrix.verification_confirm`
-- `matrix.verification.cancel` -> `matrix.verification_cancel`
+- `matrix.verification.confirm` -> `matrix.verification.confirm`
+- `matrix.verification.cancel` -> `matrix.verification.cancel`
 - `matrix.login_flows` -> unchanged (optional)
 - `matrix.capabilities` -> unchanged (optional)
 
