@@ -254,16 +254,17 @@ async fn handle_room(
             print_call(addr, "room.list", Some(params)).await?;
         }
         "messages" => {
+            let debug = has_flag(parts, "--debug");
+            let limit = take_flag_value(parts, "--limit")
+                .or_else(|| take_kv(parts, "limit"))
+                .and_then(|value| value.parse::<usize>().ok());
+            let from = take_flag_value(parts, "--from").or_else(|| take_kv(parts, "from"));
             let account_id = require_arg(parts, lines, "account_id").await?;
             let room_id = if !parts.is_empty() {
                 parts.remove(0)
             } else {
                 select_room(addr, lines, &account_id).await?
             };
-            let limit = take_flag_value(parts, "--limit")
-                .or_else(|| take_kv(parts, "limit"))
-                .and_then(|value| value.parse::<usize>().ok());
-            let from = take_flag_value(parts, "--from").or_else(|| take_kv(parts, "from"));
             let mut params = serde_json::json!({
                 "account_id": account_id,
                 "room_id": room_id,
@@ -287,7 +288,10 @@ async fn handle_room(
             if chunk.is_empty() {
                 println!("(no messages)");
             }
-            for item in chunk {
+            for (idx, item) in chunk.iter().enumerate() {
+                if debug && idx < 3 {
+                    println!("debug event {}: {}", idx + 1, item);
+                }
                 match format_message_line(item) {
                     Some(line) => println!("{line}"),
                     None => {
@@ -812,7 +816,7 @@ fn print_help(args: &[String]) {
         "room" => {
             println!("room subcommands:");
             println!("  room list <account_id>");
-            println!("  room messages <account_id> <room_id> [--limit N] [--from TOKEN]");
+            println!("  room messages <account_id> <room_id> [--limit N] [--from TOKEN] [--debug]");
             println!("  room send <account_id> <room_id> <body...> [--txn-id ID]");
         }
         _ => println!("unknown help topic"),
