@@ -2,6 +2,7 @@ use crate::events::EventBus;
 use crate::matrix::{self, MatrixRuntime, VerificationSnapshot};
 use crate::state::{Account, AccountStatus, LoginMethod, State};
 use anyhow::Result;
+use matrix_sdk::stream::StreamExt;
 use matrix_sdk::ruma::{OwnedDeviceId, UserId};
 use ruma_common::api::IncomingResponse;
 use serde::Deserialize;
@@ -895,43 +896,158 @@ async fn handle_request(
                 )
                 .await;
 
-            if let Some(sas) = request.start_sas().await.map_err(internal_error)? {
-                sas.accept().await.map_err(internal_error)?;
-                let sas_json = sas_to_json(&sas);
+            {
+                let event_bus = event_bus.clone();
                 let verifications = {
                     let runtime = runtime.lock().await;
                     runtime.verifications_handle()
                 };
-                {
-                    let mut guard = verifications.lock().await;
-                    guard
-                        .entry(params.account_id.clone())
-                        .or_insert_with(std::collections::HashMap::new)
-                        .insert(
-                            params.flow_id.clone(),
-                            VerificationSnapshot {
-                                flow_id: params.flow_id.clone(),
-                                user_id: params.user_id.clone(),
-                                device_id: None,
-                                stage: "sas".to_string(),
-                                sas: Some(sas_json.clone()),
-                            },
-                        );
-                }
-                event_bus
-                    .emit(
-                        &params.account_id,
-                        "matrix.verification.sas",
-                        serde_json::json!({
-                            "flow_id": params.flow_id,
-                            "user_id": params.user_id,
-                            "supports_emoji": sas.supports_emoji(),
-                            "can_be_presented": sas.can_be_presented(),
-                            "emoji": sas_json.get("emoji").cloned().unwrap_or(serde_json::Value::Null),
-                            "decimals": sas_json.get("decimals").cloned().unwrap_or(serde_json::Value::Null),
-                        }),
-                    )
-                    .await;
+                let account_id = params.account_id.clone();
+                let user_id = params.user_id.clone();
+                let flow_id = params.flow_id.clone();
+                let request = request.clone();
+                tokio::spawn(async move {
+                    let mut changes = request.changes();
+                    while let Some(state) = changes.next().await {
+                        use matrix_sdk::encryption::verification::{Verification, VerificationRequestState};
+                        match state {
+                            VerificationRequestState::Ready { .. } => {
+                                if let Ok(Some(sas)) = request.start_sas().await {
+                                    let _ = sas.accept().await;
+                                    let sas_json = sas_to_json(&sas);
+                                    {
+                                        let mut guard = verifications.lock().await;
+                                        guard
+                                            .entry(account_id.clone())
+                                            .or_insert_with(std::collections::HashMap::new)
+                                            .insert(
+                                                flow_id.clone(),
+                                                VerificationSnapshot {
+                                                    flow_id: flow_id.clone(),
+                                                    user_id: user_id.clone(),
+                                                    device_id: None,
+                                                    stage: "sas".to_string(),
+                                                    sas: Some(sas_json.clone()),
+                                                },
+                                            );
+                                    }
+                                    event_bus
+                                        .emit(
+                                            &account_id,
+                                            "matrix.verification.state",
+                                            serde_json::json!({
+                                                "flow_id": flow_id,
+                                                "user_id": user_id,
+                                                "stage": "sas",
+                                            }),
+                                        )
+                                        .await;
+                                    event_bus
+                                        .emit(
+                                            &account_id,
+                                            "matrix.verification.sas",
+                                            serde_json::json!({
+                                                "flow_id": flow_id,
+                                                "user_id": user_id,
+                                                "supports_emoji": sas.supports_emoji(),
+                                                "can_be_presented": sas.can_be_presented(),
+                                                "emoji": sas_json.get("emoji").cloned().unwrap_or(serde_json::Value::Null),
+                                                "decimals": sas_json.get("decimals").cloned().unwrap_or(serde_json::Value::Null),
+                                            }),
+                                        )
+                                        .await;
+                                }
+                            }
+                            VerificationRequestState::Transitioned { verification } => {
+                                if let Verification::SasV1(sas) = verification {
+                                    let sas_json = sas_to_json(&sas);
+                                    {
+                                        let mut guard = verifications.lock().await;
+                                        guard
+                                            .entry(account_id.clone())
+                                            .or_insert_with(std::collections::HashMap::new)
+                                            .insert(
+                                                flow_id.clone(),
+                                                VerificationSnapshot {
+                                                    flow_id: flow_id.clone(),
+                                                    user_id: user_id.clone(),
+                                                    device_id: None,
+                                                    stage: "sas".to_string(),
+                                                    sas: Some(sas_json.clone()),
+                                                },
+                                            );
+                                    }
+                                    event_bus
+                                        .emit(
+                                            &account_id,
+                                            "matrix.verification.state",
+                                            serde_json::json!({
+                                                "flow_id": flow_id,
+                                                "user_id": user_id,
+                                                "stage": "sas",
+                                            }),
+                                        )
+                                        .await;
+                                    event_bus
+                                        .emit(
+                                            &account_id,
+                                            "matrix.verification.sas",
+                                            serde_json::json!({
+                                                "flow_id": flow_id,
+                                                "user_id": user_id,
+                                                "supports_emoji": sas.supports_emoji(),
+                                                "can_be_presented": sas.can_be_presented(),
+                                                "emoji": sas_json.get("emoji").cloned().unwrap_or(serde_json::Value::Null),
+                                                "decimals": sas_json.get("decimals").cloned().unwrap_or(serde_json::Value::Null),
+                                            }),
+                                        )
+                                        .await;
+                                }
+                            }
+                            VerificationRequestState::Done => {
+                                {
+                                    let mut guard = verifications.lock().await;
+                                    if let Some(entries) = guard.get_mut(&account_id) {
+                                        entries.remove(&flow_id);
+                                    }
+                                }
+                                event_bus
+                                    .emit(
+                                        &account_id,
+                                        "matrix.verification.done",
+                                        serde_json::json!({
+                                            "flow_id": flow_id,
+                                            "user_id": user_id,
+                                            "reason": "verified",
+                                        }),
+                                    )
+                                    .await;
+                                break;
+                            }
+                            VerificationRequestState::Cancelled(info) => {
+                                {
+                                    let mut guard = verifications.lock().await;
+                                    if let Some(entries) = guard.get_mut(&account_id) {
+                                        entries.remove(&flow_id);
+                                    }
+                                }
+                                event_bus
+                                    .emit(
+                                        &account_id,
+                                        "matrix.verification.cancelled",
+                                        serde_json::json!({
+                                            "flow_id": flow_id,
+                                            "user_id": user_id,
+                                            "reason": format!("{info:?}"),
+                                        }),
+                                    )
+                                    .await;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
             }
 
             Ok(Some(serde_json::json!({
@@ -975,7 +1091,7 @@ async fn handle_request(
                         serde_json::json!({
                             "flow_id": params.flow_id,
                             "user_id": params.user_id,
-                            "result": "verified",
+                            "reason": "verified",
                         }),
                     )
                     .await;

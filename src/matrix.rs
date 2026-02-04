@@ -159,7 +159,7 @@ impl MatrixRuntime {
                             serde_json::json!({
                                 "flow_id": flow_id,
                                 "user_id": sender,
-                                "result": "verified",
+                                "reason": "verified",
                             }),
                         )
                         .await;

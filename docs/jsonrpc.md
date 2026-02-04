@@ -347,12 +347,12 @@ Emitted when SAS is available (including after reconnect if still active).
 
 #### matrix.verification.done
 ```json
-{"flow_id":"abcd","user_id":"@alice:example.com","result":"verified"}
+{"flow_id":"abcd","user_id":"@alice:example.com","reason":"verified"}
 ```
 
 #### matrix.verification.cancelled
 ```json
-{"flow_id":"abcd","user_id":"@alice:example.com","reason":"user_cancelled|mismatch|timeout"}
+{"flow_id":"abcd","user_id":"@alice:example.com","reason":"user_cancelled|mismatch|timeout|error|cancelled"}
 ```
 
 ## chatterctl minimal command list (login + SAS verification)
