@@ -825,7 +825,11 @@ fn print_help(args: &[String]) {
 
 fn format_message_line(item: &serde_json::Value) -> Option<String> {
     let event = extract_event_object(item)?;
-    let sender = event.get("sender").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let sender = event
+        .get("sender_display_name")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.get("sender").and_then(|v| v.as_str()))
+        .unwrap_or("unknown");
     let content = event.get("content");
     let msgtype = content
         .and_then(|v| v.get("msgtype"))

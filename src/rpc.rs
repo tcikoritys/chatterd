@@ -800,7 +800,10 @@ async fn handle_request(
                 })?
             };
             let limit = params.limit.unwrap_or(20);
-            let messages = matrix::fetch_messages(&client, &params.room_id, limit, params.from)
+            let mut messages = matrix::fetch_messages(&client, &params.room_id, limit, params.from)
+                .await
+                .map_err(internal_error)?;
+            enrich_message_chunk(&client, &params.room_id, &mut messages.chunk)
                 .await
                 .map_err(internal_error)?;
             Ok(Some(serde_json::to_value(messages).map_err(internal_error)?))
@@ -1604,6 +1607,56 @@ fn send_event_push_raw(
         }
     });
     out_tx.send(payload.to_string()).is_ok()
+}
+
+async fn enrich_message_chunk(
+    client: &matrix_sdk::Client,
+    room_id: &str,
+    chunk: &mut [serde_json::Value],
+) -> Result<()> {
+    let room_id = matrix_sdk::ruma::RoomId::parse(room_id)?;
+    let Some(room) = client.get_room(&room_id) else {
+        return Ok(());
+    };
+    for item in chunk.iter_mut() {
+        let Some(event_obj) = extract_event_object_mut(item) else {
+            continue;
+        };
+        let sender = event_obj
+            .get("sender")
+            .and_then(|value| value.as_str());
+        let Some(sender) = sender else {
+            continue;
+        };
+        if event_obj.get("sender_display_name").is_some() {
+            continue;
+        }
+        if let Ok(user_id) = matrix_sdk::ruma::UserId::parse(sender) {
+            if let Ok(Some(member)) = room.get_member(&user_id).await {
+            if let Some(display_name) = member.display_name() {
+                if let Some(map) = event_obj.as_object_mut() {
+                    map.insert(
+                        "sender_display_name".to_string(),
+                        serde_json::Value::String(display_name.to_string()),
+                    );
+                }
+            }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn extract_event_object_mut<'a>(
+    value: &'a mut serde_json::Value,
+) -> Option<&'a mut serde_json::Value> {
+    if value.get("event").is_some() {
+        return value.get_mut("event");
+    }
+    value
+        .get_mut("kind")
+        .and_then(|value| value.get_mut("Decrypted"))
+        .and_then(|value| value.get_mut("event"))
 }
 
 fn cursor_to_seq(cursor: &str) -> Option<u64> {
