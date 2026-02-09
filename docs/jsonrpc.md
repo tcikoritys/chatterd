@@ -193,6 +193,7 @@ Response:
 ```json
 {"jsonrpc":"2.0","result":{"start":"t0","end":"t1","chunk":[{"event":"..."}]},"id":12}
 ```
+For message events, each item may include `sender_display_name` (best-effort) alongside `sender`.
 
 ### room.send
 Send a simple text message to a room.
