@@ -195,6 +195,20 @@ Response:
 ```
 For message events, each item may include `sender_display_name` (best-effort) alongside `sender`.
 
+Example message item shape:
+```json
+{
+  "event_id": "$event:example.com",
+  "sender": "@alice:example.com",
+  "sender_display_name": "Alice",
+  "type": "m.room.message",
+  "content": {
+    "msgtype": "m.text",
+    "body": "hello"
+  }
+}
+```
+
 ### room.send
 Send a simple text message to a room.
 
