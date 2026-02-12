@@ -17,3 +17,8 @@ Daemon responsibilities:
 - Audio routing and calls
 - Shared logic for all UIs
 
+# Hammering home a point
+
+This is vibecoded.
+No really, the whole thing.
+Did I mention I'm not a programmer?
